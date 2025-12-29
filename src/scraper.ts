@@ -72,7 +72,7 @@ async function login(page: Page): Promise<void> {
     console.log("Login Successful, current URL:", page.url());
 }
 
-async function getTransactions(page: Page): Promise<string[]> {
+async function getTransactions(page: Page): Promise<{ balances: string[] }> {
     await page.goto("https://portal.australiansuper.com/");        
         
     const transactionsButton = 'button:has-text("Transactions")';
@@ -94,8 +94,11 @@ async function getTransactions(page: Page): Promise<string[]> {
     const balanceText = (await balanceElements.first().innerText()).replace("$", "").trim();
     balances.push(balanceText);
     
-    console.log("Balances:", balances);
-    return balances;
+    const result = {
+        balances: balances
+    };
+    console.log(JSON.stringify(result, null, 2));
+    return result;
 }
 
 async function saveSession(browser: any): Promise<{ context: BrowserContext; reused: boolean }> {
@@ -137,11 +140,8 @@ async function main(){
     const browser = await chromium.launch({ headless: false });
     const { context } = await saveSession(browser);
     const page = await context.newPage();
-    const balances = await getTransactions(page);
-    console.log("Retrieved balances:", balances);
-    
+    await getTransactions(page);
     // await browser.close();
-
 }
 
 main();
