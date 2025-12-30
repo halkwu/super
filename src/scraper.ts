@@ -22,54 +22,106 @@ function ask(question: string): Promise<string> {
 }
 
 async function login(page: Page): Promise<void> {
-    await page.goto("https://portal.australiansuper.com/login");
-    const usernameInput = '#login-form\\.login-fieldset\\.username';
-    await page.waitForSelector(usernameInput, { state: "visible", timeout: 6000 });
-    const username = await ask("Enter your username: ");
-    await page.fill(usernameInput, username);   
+    let loginSuccess = false;
+    let retryCount = 0;
+    const maxRetries = 4;
 
-    const nextButton = 'button[data-target-id="login--form--login-proceed-cta"]';
-    await page.waitForSelector(nextButton, { state: "visible", timeout: 6000 });
-    await page.click(nextButton);
-    
-    const passwordInput = '#login-form\\.password';
-    await page.waitForSelector(passwordInput, { state: "visible", timeout: 6000 });
-    const password = await ask("Enter your password: ");
-    await page.fill(passwordInput, password);
-    
-    const loginButton = 'button[data-target-id="login--form--login-cta"]';
-    await page.waitForSelector(loginButton, { state: "visible", timeout: 6000 });
-    await page.click(loginButton);
-    
-    await page.locator('text=Verify your login').first().waitFor({ timeout: 35000 });
-    try {
-        const verificationCodeInput = 'input[id="login-otp-validation-form-config.verificationCode"]';
-        await page.waitForSelector(verificationCodeInput, { state: "visible", timeout: 6000 });
-        const verificationCode = await ask("Enter your verification code: ");
-        await page.fill(verificationCodeInput, verificationCode);
-        const verifyButton = 'button[data-target-id="login-otp-validation-form--continue-button"]';
-        await page.waitForSelector(verifyButton, { state: "visible", timeout: 6000 });
-        await page.click(verifyButton);
-        const trustDeviceButton = 'button:has-text("Trust device")';
+    while (!loginSuccess && retryCount < maxRetries) {
         try {
-            await page.waitForSelector(trustDeviceButton, { state: "visible", timeout: 6000 });
-            await page.click(trustDeviceButton);
+            if (retryCount === 0) {
+                await page.goto("https://portal.australiansuper.com/login");
+            }
+            
+            const usernameInput = '#login-form\\.login-fieldset\\.username';
+            await page.waitForSelector(usernameInput, { state: "visible", timeout: 6000 });
+            const username = await ask("Enter your username: ");
+            await page.fill(usernameInput, username);   
+
+            const nextButton = 'button[data-target-id="login--form--login-proceed-cta"]';
+            await page.waitForSelector(nextButton, { state: "visible", timeout: 6000 });
+            await page.click(nextButton);
+            
+            const passwordInput = '#login-form\\.password';
+            await page.waitForSelector(passwordInput, { state: "visible", timeout: 6000 });
+            const password = await ask("Enter your password: ");
+            await page.fill(passwordInput, password);
+            
+            const loginButton = 'button[data-target-id="login--form--login-cta"]';
+            await page.waitForSelector(loginButton, { state: "visible", timeout: 6000 });
+            await page.click(loginButton);
+            
+            let verificationPageFound = false;
+            try {
+                await page.locator('text=Verify your login').first().waitFor({ timeout: 35000 });
+                verificationPageFound = true;
+                loginSuccess = true;
+            } catch (error) {
+                await page.waitForTimeout(2000);
+                const pageText = await page.textContent('body');
+                if (pageText && pageText.includes("Sorry, these details aren't right")) {
+                    console.log("Login error: Username or password is incorrect");
+                    retryCount++;
+                    if (retryCount < maxRetries) {
+                        console.log(`Please try again (Attempt ${retryCount + 1}/${maxRetries})`);
+                        await page.goto("https://portal.australiansuper.com/login");
+                        continue;
+                    } else {
+                        throw new Error("Max login attempts exceeded");
+                    }
+                } else {
+                    throw new Error("Verification page not found and no error message detected");
+                }
+            }
+            
+            try {
+                const feedbackButton = 'button:has-text("No Thanks")';
+                try {
+                    await page.waitForSelector(feedbackButton, { state: "visible", timeout: 5000 });
+                    await page.click(feedbackButton);
+                } catch (error) {
+                    // console.log("No feedback dialog found, continuing...");
+                }
+                const verificationCodeInput = 'input[id="login-otp-validation-form-config.verificationCode"]';
+                await page.waitForSelector(verificationCodeInput, { state: "visible", timeout: 6000 });
+                const verificationCode = await ask("Enter your verification code: ");
+                await page.fill(verificationCodeInput, verificationCode);
+                const verifyButton = 'button[data-target-id="login-otp-validation-form--continue-button"]';
+                await page.waitForSelector(verifyButton, { state: "visible", timeout: 6000 });
+                await page.click(verifyButton);
+                const trustDeviceButton = 'button:has-text("Trust device")';
+                try {
+                    await page.waitForSelector(trustDeviceButton, { state: "visible", timeout: 6000 });
+                    await page.click(trustDeviceButton);
+                } catch (error) {
+                    console.log("Trust device button not found, skipping...");
+                }
+                const replaceButton = 'button:has-text("Replace")';
+                try {
+                    await page.waitForSelector(replaceButton, { state: "visible", timeout: 6000 });
+                    await page.click(replaceButton);
+                } catch (error) {
+                    console.log("Replace button not found, skipping...");
+                }
+            } catch (error) {
+                console.log("Verification step failed:", error);
+            }
+            
+            await page.waitForURL("https://portal.australiansuper.com/", { timeout: 6000 });
+            // console.log("Login Successful, current URL:", page.url());
+            
         } catch (error) {
-            console.log("Trust device button not found, skipping...");
+            if ((error as Error).message === "Max login attempts exceeded") {
+                throw error;
+            }
+            retryCount++;
+            if (retryCount < maxRetries) {
+                console.log(`Login attempt failed, retrying... (${retryCount}/${maxRetries})`);
+            } else {
+                console.error("Login failed after", maxRetries, "attempts");
+                throw error;
+            }
         }
-        const replaceButton = 'button:has-text("Replace")';
-        try {
-            await page.waitForSelector(replaceButton, { state: "visible", timeout: 6000 });
-            await page.click(replaceButton);
-        } catch (error) {
-            console.log("Replace button not found, skipping...");
-        }
-    } catch (error) {
-        console.log("Verify your login page not found, skipping verification...", error);
     }
-    
-    await page.waitForURL("https://portal.australiansuper.com/", { timeout: 6000 });
-    console.log("Login Successful, current URL:", page.url());
 }
 
 async function getTransactions(page: Page): Promise<{ balances: string[] }> {
@@ -106,13 +158,11 @@ async function saveSession(browser: any): Promise<{ context: BrowserContext; reu
     let reused = false;
 
     if (fs.existsSync(SESSION_FILE)) {
-        console.log("Loading session from file...");
         context = await browser.newContext({
         storageState: SESSION_FILE,
         });
         reused = true;
     } else {
-        console.log("No session file found.");
         context = await browser.newContext();
     }
 
@@ -120,10 +170,10 @@ async function saveSession(browser: any): Promise<{ context: BrowserContext; reu
     try {
         await page.goto("https://portal.australiansuper.com/");
         await page.waitForSelector('button:has-text("Transactions")',{ timeout: 6000 });
-        console.log("Session is valid");
+        // console.log("Session is valid");
         return { context, reused};
     } catch (error) {
-        console.log("Session is invalid, need to log in again.");
+        // console.log("Session is invalid, need to log in again.");
     }
 
     try {
