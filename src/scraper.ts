@@ -171,7 +171,7 @@ async function saveSession(browser: any): Promise<{ context: BrowserContext; reu
         await page.goto("https://portal.australiansuper.com/");
         await page.waitForSelector('button:has-text("Transactions")',{ timeout: 6000 });
         // console.log("Session is valid");
-        return { context, reused};
+        return { context, reused };
     } catch (error) {
         // console.log("Session is invalid, need to log in again.");
     }
