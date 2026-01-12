@@ -54,9 +54,6 @@ async function extractAccountInfo(page: Page): Promise<{ id?: string; name?: str
 			}
 		}
 
-		// Balance: data-testid="balance-quote-amount"
-		// Balance: prefer the dd immediately following the specific balance label dt,
-		// fallback to any element with data-testid="balance-quote-amount"
 		let bal = document.querySelector('dt._balanceRolloverLabel_zchqw_5 + dd[data-testid="balance-quote-amount"]') || document.querySelector('[data-testid="balance-quote-amount"]');
 		if (bal) {
 			const txt = (bal.textContent || '').trim();
@@ -107,7 +104,7 @@ async function tryFill(page: Page, selectors: string[], value: string, timeout =
 	return false;
 }
 
-async function login(page: Page, memberArg?: string, passwordArg?: string): Promise<void> {
+async function getLoginPage(page: Page): Promise<void> {
 	console.log("Navigating to cbussuper site...");
 	await page.goto("https://www.cbussuper.com.au/");
 
@@ -117,46 +114,39 @@ async function login(page: Page, memberArg?: string, passwordArg?: string): Prom
 		'li[data-section="members"]',
 	];
 
-	let opened = false;
-	opened = await tryClick(page, MEMBER_MENU_SELECTORS, 3000);
+	const opened = await tryClick(page, MEMBER_MENU_SELECTORS, 3000);
 
-	if (opened) {
-		try {
-			await page.waitForSelector('li[data-section="members"].open, .subnav.members', { timeout: 3000 }).catch(() => {});
+	if (!opened) return;
 
-			// Try clicking explicit link inside the link-button container that appears after expanding
-			const clickedLinkButton = await tryClick(page, [
-				'div.link-button a.dtm-member-login',
-			], 3000);
-			if (clickedLinkButton) {
-				await page.waitForLoadState('networkidle').catch(() => {});
-			}
+	try {
+		await page.waitForSelector('li[data-section="members"].open, .subnav.members', { timeout: 3000 }).catch(() => {});
 
-			// look specifically inside the members subnav first, then fallback to global anchor
-			const memberAnchor = page.locator('.subnav.members a.dtm-member-login, a.dtm-member-login').first();
-			if (await memberAnchor.count() > 0) {
-				const href = await memberAnchor.getAttribute('href');
-				if (href) {
-					try {
-						await page.goto(href);
-					} catch (e) {
-						console.log('Navigation to dtm-member-login href failed, attempting click fallback');
-						await memberAnchor.click().catch(() => {});
-					}
-				} else {
+		const clickedLinkButton = await tryClick(page, ['div.link-button a.dtm-member-login'], 3000);
+		if (clickedLinkButton) await page.waitForLoadState('networkidle').catch(() => {});
+
+		const memberAnchor = page.locator('.subnav.members a.dtm-member-login, a.dtm-member-login').first();
+		if (await memberAnchor.count() > 0) {
+			const href = await memberAnchor.getAttribute('href');
+			if (href) {
+				try {
+					await page.goto(href);
+				} catch (e) {
+					console.log('Navigation to dtm-member-login href failed, attempting click fallback');
 					await memberAnchor.click().catch(() => {});
 				}
-			} 
-		} catch (e) {
-			console.log('Error while handling member subnav:', e.message ?? e);
+			} else {
+				await memberAnchor.click().catch(() => {});
+			}
 		}
-	} 
+	} catch (e) {
+		console.log('Error while handling member subnav:', e.message ?? e);
+	}
+}
 
-	// wait for a login form to appear
+async function performLogin(page: Page, id?: string, pin?: string): Promise<void> {
 	await page.waitForLoadState("networkidle");
 
 	const memberSelectors = [
-		// Okta-specific username field inside span wrapper
 		'span[data-se="o-form-input-username"] input',
 		'input#okta-signin-username',
 		'input[name="memberNumber"]',
@@ -165,11 +155,10 @@ async function login(page: Page, memberArg?: string, passwordArg?: string): Prom
 		'input[placeholder*="Member"]',
 		'input[type="text"]',
 	];
-    const filledMember = await tryFill(page, memberSelectors, memberArg ?? '', 3000);
+	const filledMember = await tryFill(page, memberSelectors, id ?? '', 3000);
 	if (!filledMember) console.warn("Member input not found — you may need to adjust selectors.");
 
 	const passwordSelectors = [
-		// Okta-specific password field inside span wrapper
 		'span[data-se="o-form-input-password"] input',
 		'input#okta-signin-password',
 		'input[type="password"]',
@@ -177,11 +166,10 @@ async function login(page: Page, memberArg?: string, passwordArg?: string): Prom
 		'input[id*="password"]',
 	];
 
-	const filledPassword = await tryFill(page, passwordSelectors, passwordArg ?? '', 3000);
+	const filledPassword = await tryFill(page, passwordSelectors, pin ?? '', 3000);
 	if (!filledPassword) console.warn("Password input not found — you may need to adjust selectors.");
 
 	const submitted = await tryClick(page, [
-		// Okta submit button
 		'input#okta-signin-submit',
 		'div.o-form-button-bar input[type="submit"]',
 		'button[type="submit"]',
@@ -201,36 +189,7 @@ async function login(page: Page, memberArg?: string, passwordArg?: string): Prom
 
 	try {
 		await page.waitForLoadState("networkidle");
-		// then click the Balance quote link and wait for navigation.
-		try {
-			const clickedSuper = await tryClick(page, ['button:has-text("Super")', 'a:has-text("Super")'], 5000);
-			if (clickedSuper) {
-				await page.waitForFunction(() => {
-					const els = Array.from(document.querySelectorAll('button, a'));
-					const el = els.find(e => (e.textContent || '').trim().includes('Super'));
-					return !!el && typeof el.className === 'string' && el.className.includes('navItemActive');
-				}, {}, { timeout: 5000 }).catch(() => {});
-			} else {
-				console.log('Post-login: Super nav item not found/clickable');
-			}
-
-			const clickedBalance = await tryClick(page, ['a:has-text("Balance quote")', 'a[href*="balance-quote"]'], 5000);
-			if (clickedBalance) {
-				await page.waitForSelector('[data-testid="balance-quote-amount"]', { timeout: 10000 }).catch(() => {});
-				try {
-					const info = await extractAccountInfo(page);
-					console.log(JSON.stringify(info, null, 2));
-				} catch (extractErr) {
-					console.log('Error extracting account info:', extractErr);
-				}
-			} else {
-				console.log('Balance quote link not found after login.');
-			}
-		} catch (postErr) {
-			console.log('Post-login navigation error:', postErr);
-		}
 	} catch (e) {
-		// try URL change as another indicator
 		const url = page.url();
 		if (!url.includes("login")) {
 			console.log("Login may have succeeded (URL changed):", url);
@@ -240,24 +199,67 @@ async function login(page: Page, memberArg?: string, passwordArg?: string): Prom
 	}
 }
 
-async function restoreOrCreateContext(browser: any): Promise<{ context: BrowserContext; reused: boolean }> {
+async function navigateToBalance(page: Page): Promise<boolean> {
+	try {
+		const clickedSuper = await tryClick(page, ['button:has-text("Super")', 'a:has-text("Super")'], 5000);
+		if (clickedSuper) {
+			await page.waitForFunction(() => {
+				const els = Array.from(document.querySelectorAll('button, a'));
+				const el = els.find(e => (e.textContent || '').trim().includes('Super'));
+				return !!el && typeof el.className === 'string' && el.className.includes('navItemActive');
+			}, {}, { timeout: 5000 }).catch(() => {});
+		} else {
+			console.log('Post-login: Super nav item not found/clickable');
+		}
+
+		const clickedBalance = await tryClick(page, ['a:has-text("Balance quote")', 'a[href*="balance-quote"]'], 5000);
+		if (clickedBalance) {
+			await page.waitForSelector('[data-testid="balance-quote-amount"]', { timeout: 10000 }).catch(() => {});
+			return true;
+		}
+		console.log('Balance quote link not found after login.');
+		return false;
+	} catch (e) {
+		console.log('Post-login navigation error:', e);
+		return false;
+	}
+}
+
+export async function queryBalance(id?: string, pin?: string, headless?: boolean): Promise<{ id?: string; name?: string; balance?: number; currency?: string } | null> {
+	const browser = await chromium.launch({ headless });
+	const { context } = await CreateContext(browser);
+	const page = await context.newPage();
+	try {
+		await getLoginPage(page);
+		await performLogin(page, id, pin);
+		const ok = await navigateToBalance(page);
+		if (!ok) return null;
+		const info = await extractAccountInfo(page);
+		return info;
+	} catch (extractErr) {
+		console.log('Error extracting account info:', extractErr);
+		return null;
+	} finally {
+		await browser.close().catch(() => {});
+	}
+}
+
+async function CreateContext(browser: any): Promise<{ context: BrowserContext; reused: boolean }> {
 	const context = await browser.newContext();
 	return { context, reused: false };
 }
 
 async function main() {
-	const browser = await chromium.launch({ headless: false });
-	const { context } = await restoreOrCreateContext(browser);
-	const page = await context.newPage();
-	const [, , memberArg, passwordArg] = process.argv;
-
+	const [, , id, pin, headlessArg] = process.argv;
 	try {
-		await login(page, memberArg, passwordArg);
-        await browser.close();
+		const info = await queryBalance(id, pin, headlessArg !== 'false');
+		console.log(JSON.stringify(info, null, 2));
 	} catch (err) {
-		console.error("Login flow failed:", err);
+		console.error("queryBalance failed:", err);
 	}
 }
 
-main();
+if (require.main === module) {
+	main();
+}
 

@@ -1,9 +1,5 @@
 import { chromium, Page, BrowserContext } from "playwright";
 import * as readline from "readline";
-import fs from "fs";
-import path from "path";
-
-const SESSION_FILE = path.join(__dirname, "session.json");
 
 function ask(question: string): Promise<string> {
     const rl = readline.createInterface({
@@ -21,7 +17,7 @@ function ask(question: string): Promise<string> {
     );
 }
 
-async function login(page: Page): Promise<void> {
+async function login(page: Page, id?: string, pin?: string): Promise<void> {
     let loginSuccess = false;
     let retryCount = 0;
     const maxRetries = 4;
@@ -34,8 +30,9 @@ async function login(page: Page): Promise<void> {
             
             const usernameInput = '#login-form\\.login-fieldset\\.username';
             await page.waitForSelector(usernameInput, { state: "visible", timeout: 6000 });
-            const username = await ask("Enter your username: ");
-            await page.fill(usernameInput, username);   
+            const username = id;
+            if (!username) throw new Error("Username must be provided as a CLI argument");
+            await page.type(usernameInput, username, { delay: 20 });
 
             const nextButton = 'button[data-target-id="login--form--login-proceed-cta"]';
             await page.waitForSelector(nextButton, { state: "visible", timeout: 6000 });
@@ -43,8 +40,9 @@ async function login(page: Page): Promise<void> {
             
             const passwordInput = '#login-form\\.password';
             await page.waitForSelector(passwordInput, { state: "visible", timeout: 6000 });
-            const password = await ask("Enter your password: ");
-            await page.fill(passwordInput, password);
+            const password = pin;
+            if (!password) throw new Error("Password must be provided as a CLI argument");
+            await page.type(passwordInput, password, { delay: 20 });
             
             const loginButton = 'button[data-target-id="login--form--login-cta"]';
             await page.waitForSelector(loginButton, { state: "visible", timeout: 6000 });
@@ -52,7 +50,7 @@ async function login(page: Page): Promise<void> {
             
             let verificationPageFound = false;
             try {
-                await page.locator('text=Verify your login').first().waitFor({ timeout: 35000 });
+                await page.locator('text=Verify your login').first().waitFor({ timeout: 50000 });
                 verificationPageFound = true;
                 loginSuccess = true;
             } catch (error) {
@@ -124,74 +122,97 @@ async function login(page: Page): Promise<void> {
     }
 }
 
-async function getTransactions(page: Page): Promise<{ balances: string[] }> {
-    await page.goto("https://portal.australiansuper.com/");        
-        
-    const transactionsButton = 'button:has-text("Transactions")';
-    await page.waitForSelector(transactionsButton, { state: "visible", timeout: 10000 });
-    await page.click(transactionsButton);
-            
-    const contributionsLink = 'a:has-text("Contributions")';
-    await page.waitForSelector(contributionsLink, { state: "visible", timeout: 6000 });
-    await page.click(contributionsLink);
-
-    const viewtransactionsLink = 'a:has-text("View all contributions")';
-    await page.waitForSelector(viewtransactionsLink, { state: "visible", timeout: 6000 });
-    await page.click(viewtransactionsLink);
-    
-    await page.waitForURL("https://portal.australiansuper.com/transactions/transaction-history", { timeout: 6000 });
-    
-    const balances: string[] = [];
-    const balanceElements = await page.locator('p[class*="SummaryBalance"]');
-    const balanceText = (await balanceElements.first().innerText()).replace("$", "").trim();
-    balances.push(balanceText);
-    
-    const result = {
-        balances: balances
-    };
-    console.log(JSON.stringify(result, null, 2));
-    return result;
-}
-
-async function saveSession(browser: any): Promise<{ context: BrowserContext; reused: boolean }> {
-    let context: BrowserContext;
-    let reused = false;
-
-    if (fs.existsSync(SESSION_FILE)) {
-        context = await browser.newContext({
-        storageState: SESSION_FILE,
-        });
-        reused = true;
-    } else {
-        context = await browser.newContext();
-    }
-
+export async function queryResult(id?: string, pin?: string, headless?: boolean): Promise<{ id: string; name: string; balance: number; currency: string } | null> {
+    const browser = await chromium.launch({ headless });
+    const context = await browser.newContext();
     const page = await context.newPage();
     try {
+        await login(page, id, pin);
         await page.goto("https://portal.australiansuper.com/");
-        await page.waitForSelector('button:has-text("Transactions")',{ timeout: 6000 });
-        // console.log("Session is valid");
-        return { context, reused };
-    } catch (error) {
-        // console.log("Session is invalid, need to log in again.");
+
+        const profileSelectors = [
+        'h2:has-text("Set-up your profile")',
+        'h2:has-text("Set up your profile")',
+        'text=Set-up your profile',
+        'text=Set up your profile'
+        ];
+
+        let profileFound = false;
+        for (const sel of profileSelectors) {
+            try {
+                await page.waitForSelector(sel, { state: 'visible', timeout: 3000 });
+                profileFound = true;
+                break;
+            } catch {
+            // try next selector
+            }
+        }
+    if (!profileFound) {
+    console.warn("Profile heading not found; continuing without it.");
     }
 
+    let name = "";
+        try {
+            const h1 = page.locator("h1").first();
+            if (await h1.count() > 0) {
+                const heading = (await h1.textContent())?.replace(/\r?\n/g, " ").trim() || "";
+                const m = heading.match(/Welcome\s+(.+)$/i);
+                if (m) name = m[1].trim();
+            }
+       } catch (e) {}
+
+        let memberId = "";
+        try {
+            const memberIdLocator = page.locator('p:has-text("Member number") + p').first();
+            if (await memberIdLocator.count() > 0) {
+                memberId = (await memberIdLocator.textContent())?.trim() || "";
+            } 
+        } catch (e) {}
+
+        const transactionsButton = 'button:has-text("Transactions")';
+        await page.waitForSelector(transactionsButton, { state: "visible", timeout: 6000 });
+        await page.click(transactionsButton);
+
+        const contributionsDropdownLink = 'div[aria-hidden="false"] a:has-text("Contributions")';
+        await page.waitForSelector(contributionsDropdownLink, { state: "visible", timeout: 6000 });
+        await page.click(contributionsDropdownLink);
+
+        const viewtransactionsLink = 'a:has-text("View all contributions")';
+        await page.waitForSelector(viewtransactionsLink, { state: "visible", timeout: 6000 });
+        await page.click(viewtransactionsLink);
+
+        await page.waitForURL("https://portal.australiansuper.com/transactions/transaction-history", { timeout: 6000 });
+
+        const balanceElements = await page.locator('p[class*="SummaryBalance"]');
+        const balanceText = (await balanceElements.first().textContent())?.replace("$", "").trim() || "";
+        const balance = parseFloat(balanceText.replace(/,/g, ""));
+        
+
+        const result = { 
+            id: memberId,
+            name: name,
+            balance: balance,
+            currency: "AUD"
+         };
+        return result;
+    } catch (err) {
+        console.error('queryResult failed:', err);
+        return null;
+    } finally {
+        await browser.close().catch(() => {});
+    }
+}
+
+async function main() {
+    const [, , id, pin, headlessArg] = process.argv;
     try {
-        await login(page);
-        await context.storageState({ path: SESSION_FILE });
-        return { context, reused: false };
-    } catch (error) {
-        console.log("Error closing page:", error);
-        throw error;
+        const info = await queryResult(id, pin, headlessArg !== 'false');
+        console.log(JSON.stringify(info, null, 2));
+    } catch (err) {
+        console.error('queryResult failed:', err);
     }
 }
 
-async function main(){
-    const browser = await chromium.launch({ headless: false });
-    const { context } = await saveSession(browser);
-    const page = await context.newPage();
-    await getTransactions(page);
-    // await browser.close();
+if (require.main === module) {
+    main();
 }
-
-main();
