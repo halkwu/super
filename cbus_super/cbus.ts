@@ -1,4 +1,18 @@
-import { chromium, BrowserContext, Page } from "playwright";
+import { chromium, BrowserContext, Page, Browser } from "playwright";
+
+// --- Shared browser/session management ---
+let browserInstance: Browser | null = null;
+const sessionStore = new Map<string, { context: BrowserContext; page: Page; verified?: boolean }>();
+
+async function ensureBrowser(headless = true): Promise<Browser> {
+	if (!browserInstance) {
+		browserInstance = await chromium.launch({ headless });
+		process.on('exit', async () => {
+			try { await browserInstance?.close(); } catch (_) {}
+		});
+	}
+	return browserInstance;
+}
 
 async function tryClick(page: Page, selectors: string[], timeout = 4000): Promise<boolean> {
 	for (const s of selectors) {
@@ -25,61 +39,6 @@ async function tryClick(page: Page, selectors: string[], timeout = 4000): Promis
 		}
 	}
 	return false;
-}
-
-async function extractAccountInfo(page: Page): Promise<{ id?: string; name?: string; balance?: number; currency?: string}> {
-	return await page.evaluate(() => {
-		const result: any = {};
-		const headers = Array.from(document.querySelectorAll('h3'));
-		const personalHeader = headers.find(h => (h.textContent || '').trim() === 'Personal details');
-		let dl: Element | null = null;
-		if (personalHeader) {
-			if (personalHeader.nextElementSibling && personalHeader.nextElementSibling.tagName.toLowerCase() === 'dl') {
-				dl = personalHeader.nextElementSibling;
-			} else if (personalHeader.parentElement) {
-				dl = personalHeader.parentElement.querySelector('dl');
-			}
-		}
-
-		if (dl) {
-			const divs = Array.from(dl.querySelectorAll('div'));
-			for (const div of divs) {
-				const dt = div.querySelector('dt');
-				const dd = div.querySelector('dd');
-				if (!dt || !dd) continue;
-				const key = (dt.textContent || '').trim().toLowerCase();
-				const val = (dd.textContent || '').trim();
-				if (key.includes('member number')) result.id = val;
-				if (key === 'name') result.name = val;
-			}
-		}
-
-		let bal = document.querySelector('dt._balanceRolloverLabel_zchqw_5 + dd[data-testid="balance-quote-amount"]') || document.querySelector('[data-testid="balance-quote-amount"]');
-		if (bal) {
-			const txt = (bal.textContent || '').trim();
-			// Try to extract currency symbol or 3-letter code
-			let currency: string | undefined;
-			const codeMatch = txt.match(/[A-Z]{3}/);
-			if (codeMatch) {
-				currency = codeMatch[0];
-			} else {
-				const symMatch = txt.match(/[^0-9.,\-\s]+/);
-				if (symMatch) currency = symMatch[0].trim();
-			}
-
-			// Extract numeric portion, remove thousand separators
-			const numStr = txt.replace(/[^0-9.,\-]/g, '').replace(/,/g, '');
-			const balance = parseFloat(numStr);
-			if (!Number.isNaN(balance)) result.balance = balance;
-			if (currency) result.currency = currency;
-		}
-		return {
-			id: result.id,
-			name: result.name,
-			balance: result.balance,
-			currency:'AUD'
-		};
-	});
 }
 
 async function tryFill(page: Page, selectors: string[], value: string, timeout = 4000): Promise<boolean> {
@@ -201,6 +160,23 @@ async function performLogin(page: Page, id?: string, pin?: string): Promise<void
 
 async function navigateToBalance(page: Page): Promise<boolean> {
 	try {
+		// Prefer clicking the Balance quote link inside the secondary links container
+		const preferredSelectors = [
+			'div._secondaryLinksContainer_1b0ub_328 a:has-text("Balance quote")',
+			'a.cta:has-text("Balance quote")',
+			'a:has-text("Balance quote")',
+			'a[href*="/super-account/balance-quote"]',
+			'a[href*="balance-quote"]',
+		];
+
+		const clickedPreferred = await tryClick(page, preferredSelectors, 5000);
+		if (clickedPreferred) {
+			await page.waitForLoadState('networkidle').catch(() => {});
+			await page.waitForSelector('[data-testid="balance-quote-amount"]', { timeout: 10000 }).catch(() => {});
+			return true;
+		}
+
+		// Fallback: ensure Super nav is expanded then retry preferred selectors
 		const clickedSuper = await tryClick(page, ['button:has-text("Super")', 'a:has-text("Super")'], 5000);
 		if (clickedSuper) {
 			await page.waitForFunction(() => {
@@ -208,15 +184,16 @@ async function navigateToBalance(page: Page): Promise<boolean> {
 				const el = els.find(e => (e.textContent || '').trim().includes('Super'));
 				return !!el && typeof el.className === 'string' && el.className.includes('navItemActive');
 			}, {}, { timeout: 5000 }).catch(() => {});
+
+			const clickedAfterSuper = await tryClick(page, preferredSelectors, 5000);
+			if (clickedAfterSuper) {
+				await page.waitForSelector('[data-testid="balance-quote-amount"]', { timeout: 10000 }).catch(() => {});
+				return true;
+			}
 		} else {
 			console.log('Post-login: Super nav item not found/clickable');
 		}
 
-		const clickedBalance = await tryClick(page, ['a:has-text("Balance quote")', 'a[href*="balance-quote"]'], 5000);
-		if (clickedBalance) {
-			await page.waitForSelector('[data-testid="balance-quote-amount"]', { timeout: 10000 }).catch(() => {});
-			return true;
-		}
 		console.log('Balance quote link not found after login.');
 		return false;
 	} catch (e) {
@@ -225,41 +202,179 @@ async function navigateToBalance(page: Page): Promise<boolean> {
 	}
 }
 
-export async function queryBalance(id?: string, pin?: string, headless?: boolean): Promise<{ id?: string; name?: string; balance?: number; currency?: string } | null> {
-	const browser = await chromium.launch({ headless });
-	const { context } = await CreateContext(browser);
-	const page = await context.newPage();
+async function extractAccountInfo(page: Page): Promise<{ id?: string; name?: string; balance?: number; currency?: string}> {
+	return await page.evaluate(() => {
+		const result: any = {};
+		const headers = Array.from(document.querySelectorAll('h3'));
+		const personalHeader = headers.find(h => (h.textContent || '').trim() === 'Personal details');
+		let dl: Element | null = null;
+		if (personalHeader) {
+			if (personalHeader.nextElementSibling && personalHeader.nextElementSibling.tagName.toLowerCase() === 'dl') {
+				dl = personalHeader.nextElementSibling;
+			} else if (personalHeader.parentElement) {
+				dl = personalHeader.parentElement.querySelector('dl');
+			}
+		}
+
+		if (dl) {
+			const divs = Array.from(dl.querySelectorAll('div'));
+			for (const div of divs) {
+				const dt = div.querySelector('dt');
+				const dd = div.querySelector('dd');
+				if (!dt || !dd) continue;
+				const key = (dt.textContent || '').trim().toLowerCase();
+				const val = (dd.textContent || '').trim();
+				if (key.includes('member number')) result.id = val;
+				if (key === 'name') result.name = val;
+			}
+		}
+
+		let bal = document.querySelector('dt._balanceRolloverLabel_zchqw_5 + dd[data-testid="balance-quote-amount"]') || document.querySelector('[data-testid="balance-quote-amount"]');
+		if (bal) {
+			const txt = (bal.textContent || '').trim();
+			// Try to extract currency symbol or 3-letter code
+			let currency: string | undefined;
+			const codeMatch = txt.match(/[A-Z]{3}/);
+			if (codeMatch) {
+				currency = codeMatch[0];
+			} else {
+				const symMatch = txt.match(/[^0-9.,\-\s]+/);
+				if (symMatch) currency = symMatch[0].trim();
+			}
+
+			// Extract numeric portion, remove thousand separators
+			const numStr = txt.replace(/[^0-9.,\-]/g, '').replace(/,/g, '');
+			const balance = parseFloat(numStr);
+			if (!Number.isNaN(balance)) result.balance = balance;
+			if (currency) result.currency = currency;
+		}
+		return {
+			id: result.id,
+			name: result.name,
+			balance: result.balance,
+			currency:'AUD'
+		};
+	});
+}
+
+
+// export async function queryBalance(id?: string, pin?: string, headless = true): Promise<{ id?: string; name?: string; balance?: number; currency?: string } | null> {
+// 	const browser = await ensureBrowser(headless);
+// 	const context = await browser.newContext();
+// 	const page = await context.newPage();
+// 	try {
+// 		await getLoginPage(page);
+// 		await performLogin(page, id, pin);
+// 		const ok = await navigateToBalance(page);
+// 		if (!ok) return null;
+// 		const info = await extractAccountInfo(page);
+// 		return info;
+// 	} catch (extractErr) {
+// 		console.log('Error extracting account info:', extractErr);
+// 		return null;
+// 	} finally {
+// 		await context.close().catch(() => {});
+// 	}
+// }
+
+export async function requestSession(id?: string, pin?: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
 	try {
-		await getLoginPage(page);
-		await performLogin(page, id, pin);
-		const ok = await navigateToBalance(page);
-		if (!ok) return null;
-		const info = await extractAccountInfo(page);
-		return info;
-	} catch (extractErr) {
-		console.log('Error extracting account info:', extractErr);
+		const browser = await ensureBrowser(headless);
+		const context = await browser.newContext();
+		const page = await context.newPage();
+		try {
+			await getLoginPage(page);
+			await performLogin(page, id, pin);
+			// Give the page a moment to settle after submit and any redirects
+			await page.waitForLoadState('networkidle').catch(() => {});
+			
+			// Require that the post-login flow shows the member area (Balance quote).
+			const hasMemberArea = await navigateToBalance(page).catch(() => false);
+			if (!hasMemberArea) {
+				await context.close().catch(() => {});
+				return { identifier: null, storageState: null, response: 'fail' };
+			}
+			const storageState = await context.storageState();
+			const identifier = (Math.random().toString(36).slice(2));
+			sessionStore.set(identifier, { context, page, verified: true });
+			return { 
+				identifier, 
+				storageState, 
+				response: 'success' };
+		} catch (e) {
+			await context.close().catch(() => {});
+			return { identifier: null, storageState: null, response: 'fail' };
+		}
+	} catch (e) {
+		return { identifier: null, response: 'error' };
+	}
+}
+
+export async function queryWithSession(storageIdentifier: any): Promise<{ id?: string; name?: string; balance?: number; currency?: string } | null> {
+	try {
+		// Expect `storageIdentifier` to be either the object returned by `requestSession` or the identifier string.
+		if (!storageIdentifier) return null;
+
+		let identifier: string | undefined;
+		if (typeof storageIdentifier === 'string') {
+			identifier = storageIdentifier;
+		} else if (typeof storageIdentifier === 'object' && storageIdentifier !== null && typeof storageIdentifier.identifier === 'string') {
+			identifier = storageIdentifier.identifier;
+		} else {
+			return null;
+		}
+
+		if (!identifier || !sessionStore.has(identifier)) return null;
+		const stored = sessionStore.get(identifier) as any;
+		if (!stored || stored.verified !== true) return null;
+		try {
+			const page = stored.page;
+			await page.bringToFront?.().catch(() => {});
+			try {
+				// Navigate to Home first to ensure consistent nav state, then go to Balance quote
+				const homeSelectors = [
+					'a:has-text("Home")',
+					'a._navItem_1b0ub_55:has-text("Home")',
+					'a._navItem_1b0ub_55._buttonReset_1b0ub_11:has-text("Home")',
+					'a[href="/"]',
+					'a[href*="?acc=super"]',
+				];
+				try {
+					const homeClicked = await tryClick(page, homeSelectors, 3000);
+					if (homeClicked) await page.waitForLoadState('networkidle').catch(() => {});
+				} catch (clickErr) {
+					console.log('queryWithSession: home click failed:', clickErr);
+				}
+
+				// Ensure the page is showing the balance/personal details before extracting
+				const ok = await navigateToBalance(page);
+				if (!ok) console.log('queryWithSession: navigateToBalance returned false; extraction may miss data');
+			} catch (navErr) {
+				console.log('queryWithSession: navigateToBalance threw:', navErr && (navErr as any).message ? (navErr as any).message : navErr);
+			}
+			return await extractAccountInfo(page);
+		} catch (e) {
+			console.log('queryWithSession failed for stored session:', e);
+			return null;
+		}
+	} catch (e) {
+		console.log('queryWithSession failed:', e && (e as any).message ? (e as any).message : e);
 		return null;
-	} finally {
-		await browser.close().catch(() => {});
 	}
 }
 
-async function CreateContext(browser: any): Promise<{ context: BrowserContext; reused: boolean }> {
-	const context = await browser.newContext();
-	return { context, reused: false };
-}
 
-async function main() {
-	const [, , id, pin, headlessArg] = process.argv;
-	try {
-		const info = await queryBalance(id, pin, headlessArg !== 'false');
-		console.log(JSON.stringify(info, null, 2));
-	} catch (err) {
-		console.error("queryBalance failed:", err);
-	}
-}
+// async function main() {
+// 	const [, , id, pin, headlessArg] = process.argv;
+// 	try {
+// 		const info = await queryBalance(id, pin, headlessArg !== 'false');
+// 		console.log(JSON.stringify(info, null, 2));
+// 	} catch (err) {
+// 		console.error("queryBalance failed:", err);
+// 	}
+// }
 
-if (require.main === module) {
-	main();
-}
+// if (require.main === module) {
+// 	main();
+// }
 

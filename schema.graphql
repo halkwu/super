@@ -1,34 +1,34 @@
 """
-Custom scalar for date representation
-"""
-scalar Date
-
-"""
 Arbitrary JSON passthrough scalar used by resolvers
 """
 scalar JSON
-
-type transaction {
-  transactionId: ID
-  transactionTime: Date
-  amount: Float
-  currency: String
-  description: String
-  status: String
-  balance: Float
+type Auth {
+    response: String
+    identifier: String
 }
 
-"""
-Wrapper for transactions list returned 
-"""
-type account {
-  id: String
-  name: String
-  balance: Float
-  currency: String
+type Transaction {
+    transactionId: ID
+    transactionTime: String
+    amount: Float
+    currency: String
+    description: String
+    status: String
+    balance: Float
+}
+
+type Account {
+    id: String
+    name: String
+    balance: Float
+    currency: String
+}
+
+type Mutation {
+    auth(payload: JSON): Auth
 }
 
 type Query {
-  Account(id: String, pin: String, headless: Boolean = true): [account]
-  Transaction(id: String, pin: String, headless: Boolean = true): [transaction]
+    account(identifier: String): [Account]
+    transaction(identifier: String): [Transaction]
 }

@@ -2,7 +2,7 @@ import { ApolloServer } from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { queryResult } from './aus_super';
+import { requestOtp, verifyOtp, queryWithSession } from './aus_super';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -34,23 +34,6 @@ const JSONScalar = new GraphQLScalarType({
   }
 });
 
-const DateScalar = new GraphQLScalarType({
-  name: 'Date',
-  description: 'ISO-8601 date string',
-  serialize: (value: any) => {
-    if (value instanceof Date) return value.toISOString();
-    if (typeof value === 'string') return value;
-    return null;
-  },
-  parseValue: (value: any) => {
-    return value ? new Date(value) : null;
-  },
-  parseLiteral: (ast: any) => {
-    if (ast.kind === Kind.STRING) return new Date(ast.value);
-    return null;
-  }
-});
-
 function parseLiteral(ast: any): any {
   switch (ast.kind) {
     case Kind.STRING:
@@ -73,19 +56,30 @@ function parseLiteral(ast: any): any {
   }
 }
 
+// persistent OTP/session store shared across GraphQL requests
+const globalOtpStore = new Map<string, any>();
+
 const resolvers = {
-  Date: DateScalar,
   JSON: JSONScalar,
+  Transaction: {
+    transactionTime: (parent: any) => {
+      const val = parent && parent.transactionTime;
+      if (!val) return val;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return val;
+      return d.toISOString();
+    }
+  },
   Query: {
-    Account: async (_: any, { id, pin, headless }: { id: string, pin: string, headless?: boolean }, context: any) => {
-      const useHeadless = typeof headless === 'boolean' ? headless : true;
-      const key = `${id}:${pin}:${useHeadless}`;
+    account: async (_: any, args: any, context: any) => {
       try {
-        if (!context.fetchCache) context.fetchCache = new Map();
-        if (!context.fetchCache.has(key)) {
-          context.fetchCache.set(key, (queryResult as any)(id, pin || '', useHeadless));
-        }
-        const details: any = await context.fetchCache.get(key);
+        const identifierArg = args && args.identifier ? args.identifier : null;
+        const headers = context && context.headers ? context.headers : {};
+        const authHeader = headers.authorization || headers.Authorization || '';
+        const identifier = identifierArg || (authHeader || '').toString().replace(/^Bearer\s+/i, '');
+        if (!identifier) throw new Error('missing token for Account access; provide Authorization header or pass token argument');
+
+        const details: any = await queryWithSession(identifier);
         if (!details) return null;
         return [{
           id: details.id,
@@ -99,10 +93,69 @@ const resolvers = {
       }
     }
   }
+  ,
+  Mutation: {
+    auth: async (_: any, { payload }: { payload: any }, context: any) => {
+      try {
+        if (!context.otpStore) context.otpStore = new Map<string, any>();
+
+        const { username, password, otp, identifier } = payload || {};
+
+        // First step: request OTP token
+        if (username && password) {
+          const { identifier, storageState, response } = await requestOtp(username, password, false);
+          // store both token and storageState so verifyOtp can reuse the original page
+          if (identifier) {
+            // if requestOtp indicated immediate success, mark verified
+            const verified = response === 'success';
+            context.otpStore.set(identifier, { token: identifier, storageState, verified });
+          }
+          return { 
+            response: response, 
+            identifier: identifier 
+          };
+        }
+
+        // Second step: verify OTP using provided otpToken and code
+        if (otp && identifier) {
+          const entry = context.otpStore.get(identifier);
+          // Only allow verify when requestOtp previously returned 'need_otp'
+          if (!entry || entry.verified === true) {
+            return { response: 'invalid_or_unnecessary' };
+          }
+          // prefer passing the session token back to verifyOtp so it reuses the stored page
+          let passValue: any = identifier;
+          if (entry && entry.token) {
+            passValue = entry.token;
+          } else if (entry && entry.storageState) {
+            passValue = entry.storageState;
+          }
+          const res = await verifyOtp(otp, passValue).catch((e) => ({ response: e && e.message ? e.message : 'error' }));
+          // if verification succeeded, mark verified
+          if (res && res.response === 'success') {
+            try { entry.verified = true; context.otpStore.set(identifier, entry); } catch (_) {}
+          } else {
+            // cleanup stored state on failure to avoid reuse
+            context.otpStore.delete(identifier);
+          }
+          return { response: res.response };
+        }
+
+        return { response: 'invalid_payload' };
+      } catch (err: any) {
+        return { response: err && err.message ? err.message : 'error' };
+      }
+    }
+  }
 };
 
 async function start() {
-  const server = new ApolloServer({ typeDefs, resolvers });
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers,
+    // use a persistent otpStore so OTP sessions survive across GraphQL requests
+    context: ({ req }) => ({ headers: req ? req.headers : {}, fetchCache: new Map(), otpStore: globalOtpStore })
+  });
   const { url } = await server.listen({ port: 4000 });
   console.log(`GraphQL server running at ${url}`);
 }

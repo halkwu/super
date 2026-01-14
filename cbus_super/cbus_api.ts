@@ -2,7 +2,7 @@ import { ApolloServer } from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { queryBalance} from './cbus';
+import { queryWithSession, requestSession } from './cbus';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -34,23 +34,6 @@ const JSONScalar = new GraphQLScalarType({
   }
 });
 
-const DateScalar = new GraphQLScalarType({
-  name: 'Date',
-  description: 'ISO-8601 date string',
-  serialize: (value: any) => {
-    if (value instanceof Date) return value.toISOString();
-    if (typeof value === 'string') return value;
-    return null;
-  },
-  parseValue: (value: any) => {
-    return value ? new Date(value) : null;
-  },
-  parseLiteral: (ast: any) => {
-    if (ast.kind === Kind.STRING) return new Date(ast.value);
-    return null;
-  }
-});
-
 function parseLiteral(ast: any): any {
   switch (ast.kind) {
     case Kind.STRING:
@@ -74,19 +57,26 @@ function parseLiteral(ast: any): any {
 }
 
 const resolvers = {
-  Date: DateScalar,
   JSON: JSONScalar,
   Query: {
-    Account: async (_: any, { id, pin, headless }: { id: string, pin: string, headless?: boolean }, context: any) => {
-      const useHeadless = typeof headless === 'boolean' ? headless : true;
-      const key = `${id}:${pin}:${useHeadless}`;
+    account: async (_: any, args: any, context: any) => {
       try {
+
+        const storageIdentifier = args && args.identifier ? args.identifier : null;
+        if (!storageIdentifier) throw new Error('missing identifier for Account access; provide Authorization header or pass identifier argument');
+
+        const key = typeof storageIdentifier === 'string'
+          ? storageIdentifier
+          : (storageIdentifier && storageIdentifier.identifier) || null;
+        if (!key) throw new Error('missing identifier for Account access; provide Authorization header or pass identifier argument');
+
         if (!context.fetchCache) context.fetchCache = new Map();
         if (!context.fetchCache.has(key)) {
-          context.fetchCache.set(key, (queryBalance as any)(id, pin || '', useHeadless));
+
+          context.fetchCache.set(key, (queryWithSession as any)(storageIdentifier));
         }
         const details: any = await context.fetchCache.get(key);
-        if (!details) return null;
+        if (!details) throw new Error('missing identifier for Account access; provide Authorization header or pass identifier argument');
         return [{
           id: details.id,
           name: details.name,
@@ -98,11 +88,33 @@ const resolvers = {
         throw new Error(msg);
       }
     }
+  },
+  Mutation: {
+    auth: async (_: any, { payload }: { payload: any }, context: any) => {
+      try {
+        const { username, password } = payload || {};
+        
+        // create a stored session by providing username/password
+        if (username && password) {
+          const res = await requestSession(username, password, false);
+          return {
+            response: res.response,
+            identifier: res.identifier
+          };
+        }
+      } catch (err: any) {
+        return { response: err && err.message ? err.message : 'error', identifier: null };
+      }
+    }
   }
 };
 
 async function start() {
-  const server = new ApolloServer({ typeDefs, resolvers });
+  const server = new ApolloServer({
+    typeDefs,
+    resolvers,
+    context: ({ req }) => ({ headers: req ? req.headers : {}, fetchCache: new Map() })
+  });
   const { url } = await server.listen({ port: 4000 });
   console.log(`GraphQL server running at ${url}`);
 }
