@@ -119,8 +119,7 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
         let filled = false;
         for (const sel of verificationSelectors) {
             try {
-                await page.waitForSelector(sel, { state: 'visible', timeout: 4000 });
-                console.log(`verifyOtp: filling OTP using selector: ${sel}`);
+                await page.waitForSelector(sel, { state: 'visible', timeout: 3000 });
                 await page.fill(sel, otp);
                 filled = true;
                 break;
@@ -133,7 +132,7 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
             return { response: 'verification_input_not_found' };
         }
         const verifyButton = 'button[data-target-id="login-otp-validation-form--continue-button"]';
-        await page.waitForSelector(verifyButton, { state: 'visible', timeout: 6000 });
+        await page.waitForSelector(verifyButton, { state: 'visible', timeout: 3000 });
         await page.click(verifyButton);
         // Wait for successful navigation to the portal home
         // Wait longer for navigation or check page for success indicators

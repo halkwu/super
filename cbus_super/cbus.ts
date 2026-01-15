@@ -132,7 +132,7 @@ async function performLogin(page: Page, id?: string, pin?: string): Promise<void
 			if (!exists) continue;
 
 			const visible = await locator.isVisible().catch(() => false);
-			const navWait = page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 }).catch(() => null);
+			const navWait = page.waitForNavigation({ waitUntil: 'networkidle', timeout: 3000 }).catch(() => null);
 			if (visible) await Promise.all([locator.click({ timeout: 4000 }), navWait]);
 			else await Promise.all([locator.click({ force: true, timeout: 4000 }), navWait]);
 
