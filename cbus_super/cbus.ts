@@ -1,4 +1,5 @@
 import { chromium, BrowserContext, Page, Browser } from "playwright";
+import { randomBytes } from "crypto";
 
 // --- Shared browser/session management ---
 let browserInstance: Browser | null = null;
@@ -105,55 +106,50 @@ async function getLoginPage(page: Page): Promise<void> {
 async function performLogin(page: Page, id?: string, pin?: string): Promise<void> {
 	await page.waitForLoadState("networkidle");
 
-	const memberSelectors = [
-		'span[data-se="o-form-input-username"] input',
-		'input#okta-signin-username',
-		'input[name="memberNumber"]',
-		'input[name="username"]',
-		'input[id*="member"]',
-		'input[placeholder*="Member"]',
-		'input[type="text"]',
-	];
+	const memberSelectors = ['input[type="text"]'];
 	const filledMember = await tryFill(page, memberSelectors, id ?? '', 3000);
 	if (!filledMember) console.warn("Member input not found — you may need to adjust selectors.");
 
-	const passwordSelectors = [
-		'span[data-se="o-form-input-password"] input',
-		'input#okta-signin-password',
-		'input[type="password"]',
-		'input[name="password"]',
-		'input[id*="password"]',
-	];
-
+	const passwordSelectors = ['input[type="password"]'];
 	const filledPassword = await tryFill(page, passwordSelectors, pin ?? '', 3000);
 	if (!filledPassword) console.warn("Password input not found — you may need to adjust selectors.");
 
-	const submitted = await tryClick(page, [
-		'input#okta-signin-submit',
+	const submitSelectors = [
 		'div.o-form-button-bar input[type="submit"]',
 		'button[type="submit"]',
 		'button:has-text("Sign in")',
 		'button:has-text("Log in")',
 		'button:has-text("Login")',
 		'input[type="submit"]',
-	], 4000);
+	];
 
-	if (!submitted) console.log("Submit button not found — attempted to press Enter instead.");
+	// Try a direct locator click with a concurrent navigation wait for each candidate.
+	let clicked = false;
+	for (const s of submitSelectors) {
+		try {
+			const locator = page.locator(s).first();
+			const exists = (await locator.count().catch(() => 0)) > 0;
+			if (!exists) continue;
 
-	try {
-		await page.keyboard.press("Enter");
-	} catch (e) {
-		console.log("Error pressing Enter key:", e.message ?? e);
+			const visible = await locator.isVisible().catch(() => false);
+			const navWait = page.waitForNavigation({ waitUntil: 'networkidle', timeout: 10000 }).catch(() => null);
+			if (visible) await Promise.all([locator.click({ timeout: 4000 }), navWait]);
+			else await Promise.all([locator.click({ force: true, timeout: 4000 }), navWait]);
+
+			await page.waitForLoadState('networkidle').catch(() => {});
+			clicked = true;
+			break;
+		} catch (e) {
+			console.log(`performLogin: click failed for ${s}:`, e.message ?? e);
+		}
 	}
 
-	try {
-		await page.waitForLoadState("networkidle");
-	} catch (e) {
-		const url = page.url();
-		if (!url.includes("login")) {
-			console.log("Login may have succeeded (URL changed):", url);
-		} else {
-			throw new Error("Login did not complete — check selectors or credentials.");
+	// Fallbacks: best-effort tryClick, then Enter key as last resort. Each ensures we wait for networkidle afterwards.
+	if (!clicked) {
+		const tried = await tryClick(page, submitSelectors, 4000);
+		if (tried) {
+			await page.waitForLoadState('networkidle').catch(() => {});
+			clicked = true;
 		}
 	}
 }
@@ -162,7 +158,6 @@ async function navigateToBalance(page: Page): Promise<boolean> {
 	try {
 		// Prefer clicking the Balance quote link inside the secondary links container
 		const preferredSelectors = [
-			'div._secondaryLinksContainer_1b0ub_328 a:has-text("Balance quote")',
 			'a.cta:has-text("Balance quote")',
 			'a:has-text("Balance quote")',
 			'a[href*="/super-account/balance-quote"]',
@@ -257,28 +252,7 @@ async function extractAccountInfo(page: Page): Promise<{ id?: string; name?: str
 	});
 }
 
-
-// export async function queryBalance(id?: string, pin?: string, headless = true): Promise<{ id?: string; name?: string; balance?: number; currency?: string } | null> {
-// 	const browser = await ensureBrowser(headless);
-// 	const context = await browser.newContext();
-// 	const page = await context.newPage();
-// 	try {
-// 		await getLoginPage(page);
-// 		await performLogin(page, id, pin);
-// 		const ok = await navigateToBalance(page);
-// 		if (!ok) return null;
-// 		const info = await extractAccountInfo(page);
-// 		return info;
-// 	} catch (extractErr) {
-// 		console.log('Error extracting account info:', extractErr);
-// 		return null;
-// 	} finally {
-// 		await context.close().catch(() => {});
-// 	}
-// }
-
 export async function requestSession(id?: string, pin?: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
-	try {
 		const browser = await ensureBrowser(headless);
 		const context = await browser.newContext();
 		const page = await context.newPage();
@@ -286,16 +260,20 @@ export async function requestSession(id?: string, pin?: string, headless = false
 			await getLoginPage(page);
 			await performLogin(page, id, pin);
 			// Give the page a moment to settle after submit and any redirects
-			await page.waitForLoadState('networkidle').catch(() => {});
 			
-			// Require that the post-login flow shows the member area (Balance quote).
-			const hasMemberArea = await navigateToBalance(page).catch(() => false);
-			if (!hasMemberArea) {
-				await context.close().catch(() => {});
-				return { identifier: null, storageState: null, response: 'fail' };
-			}
+			try {
+				try {
+					const pwdCount = await page.locator('input[type="password"]').count().catch(() => 0);
+					if (pwdCount > 0) {
+						const pwdVisible = await page.locator('input[type="password"]').first().isVisible().catch(() => false);
+						if (pwdVisible) {
+							await context.close().catch(() => {});
+							return { identifier: null, storageState: null, response: 'fail' };
+						}
+					}
+				} catch (_) {}
 			const storageState = await context.storageState();
-			const identifier = (Math.random().toString(36).slice(2));
+			const identifier = randomBytes(4).toString('hex');
 			sessionStore.set(identifier, { context, page, verified: true });
 			return { 
 				identifier, 
@@ -306,7 +284,7 @@ export async function requestSession(id?: string, pin?: string, headless = false
 			return { identifier: null, storageState: null, response: 'fail' };
 		}
 	} catch (e) {
-		return { identifier: null, response: 'error' };
+		return { identifier: null, response: 'fail' };
 	}
 }
 
@@ -352,7 +330,15 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id?: s
 			} catch (navErr) {
 				console.log('queryWithSession: navigateToBalance threw:', navErr && (navErr as any).message ? (navErr as any).message : navErr);
 			}
-			return await extractAccountInfo(page);
+			// Extract information, then clean up the Playwright context and remove the stored session
+			const result = await extractAccountInfo(page);
+			try {
+				await stored.context.close().catch(() => {});
+			} catch (_) {}
+			try {
+				sessionStore.delete(identifier);
+			} catch (_) {}
+			return result;
 		} catch (e) {
 			console.log('queryWithSession failed for stored session:', e);
 			return null;

@@ -63,12 +63,12 @@ const resolvers = {
       try {
 
         const storageIdentifier = args && args.identifier ? args.identifier : null;
-        if (!storageIdentifier) throw new Error('missing identifier for Account access; provide Authorization header or pass identifier argument');
+        if (!storageIdentifier) throw new Error('Invalid or expired identifier');
 
         const key = typeof storageIdentifier === 'string'
           ? storageIdentifier
           : (storageIdentifier && storageIdentifier.identifier) || null;
-        if (!key) throw new Error('missing identifier for Account access; provide Authorization header or pass identifier argument');
+        if (!key) throw new Error('Invalid or expired identifier');
 
         if (!context.fetchCache) context.fetchCache = new Map();
         if (!context.fetchCache.has(key)) {
@@ -76,7 +76,7 @@ const resolvers = {
           context.fetchCache.set(key, (queryWithSession as any)(storageIdentifier));
         }
         const details: any = await context.fetchCache.get(key);
-        if (!details) throw new Error('missing identifier for Account access; provide Authorization header or pass identifier argument');
+        if (!details) throw new Error('Invalid or expired identifier');
         return [{
           id: details.id,
           name: details.name,
@@ -92,11 +92,10 @@ const resolvers = {
   Mutation: {
     auth: async (_: any, { payload }: { payload: any }, context: any) => {
       try {
-        const { username, password } = payload || {};
+        const { id, pin } = payload || {};
         
-        // create a stored session by providing username/password
-        if (username && password) {
-          const res = await requestSession(username, password, false);
+        if (id && pin) {
+          const res = await requestSession(id, pin, false);
           return {
             response: res.response,
             identifier: res.identifier
