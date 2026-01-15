@@ -99,16 +99,15 @@ const resolvers = {
       try {
         if (!context.otpStore) context.otpStore = new Map<string, any>();
 
-        const { username, password, otp, identifier } = payload || {};
+        const { id, pin, otp, identifier } = payload || {};
 
         // First step: request OTP token
-        if (username && password) {
-          const { identifier, storageState, response } = await requestOtp(username, password, false);
+        if (id && pin) {
+          const { identifier, storageState, response } = await requestOtp(id, pin, false);
           // store both token and storageState so verifyOtp can reuse the original page
           if (identifier) {
             // if requestOtp indicated immediate success, mark verified
-            const verified = response === 'success';
-            context.otpStore.set(identifier, { token: identifier, storageState, verified });
+            context.otpStore.set(identifier, { token: identifier, storageState, verified: false, otp_required: response === 'need_otp' });
           }
           return { 
             response: response, 
@@ -120,7 +119,7 @@ const resolvers = {
         if (otp && identifier) {
           const entry = context.otpStore.get(identifier);
           // Only allow verify when requestOtp previously returned 'need_otp'
-          if (!entry || entry.verified === true) {
+          if (!entry || entry.verified === true || entry.otp_required === false) {
             return { response: 'invalid_or_unnecessary' };
           }
           // prefer passing the session token back to verifyOtp so it reuses the stored page
@@ -130,18 +129,15 @@ const resolvers = {
           } else if (entry && entry.storageState) {
             passValue = entry.storageState;
           }
-          const res = await verifyOtp(otp, passValue).catch((e) => ({ response: e && e.message ? e.message : 'error' }));
-          // if verification succeeded, mark verified
+          const res = await verifyOtp(otp, passValue).catch(() => ({ response: 'fail' }));
+          // if verification succeeded, mark verified and return success
           if (res && res.response === 'success') {
             try { entry.verified = true; context.otpStore.set(identifier, entry); } catch (_) {}
-          } else {
-            // cleanup stored state on failure to avoid reuse
-            context.otpStore.delete(identifier);
+            return { response: res.response };
           }
-          return { response: res.response };
+          return { response: res.response || 'fail' };
         }
 
-        return { response: 'invalid_payload' };
       } catch (err: any) {
         return { response: err && err.message ? err.message : 'error' };
       }

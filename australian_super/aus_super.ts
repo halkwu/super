@@ -39,35 +39,48 @@ export async function requestOtp(username: string, password: string, headless = 
         await page.waitForSelector(loginButton, { state: "visible", timeout: 6000 });
         await page.click(loginButton);
 
-        let otpIdentifier: string | null = null;
+        const verificationSelectors = [
+            'input[id="login-otp-validation-form-config.verificationCode"]',
+            'input[id*="verificationCode"]',
+            'input[name*="verificationCode"]',
+            'input[type="tel"]',
+            'input[type="text"]'
+        ];
+
         try {
-            const resp = await page.waitForResponse(r => {
-                const url = r.url().toLowerCase();
-                return url.includes('otp') || url.includes('login') || url.includes('authenticate');
-            }, { timeout: 15000 });
+            await Promise.race([
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 8000 }),
+                page.waitForTimeout(8000)
+            ]);
+        } catch (_) {}
+
+        let foundVerification = false;
+        for (const sel of verificationSelectors) {
             try {
-                const json = await resp.json();
-                otpIdentifier = json?.otpToken || json?.otp_token || null;
-            } catch (e) {
-                console.warn('requestOtp: failed to parse OTP response JSON');
+                await page.waitForSelector(sel, { state: 'visible', timeout: 4000 });
+                foundVerification = true;
+                break;
+            } catch (_) {
+                // try next selector
             }
-        } catch (e) {
-            return { identifier: null, storageState: undefined, response: 'invalid_credentials' };
         }
 
-                const storageState = await context.storageState();
-                // ensure we persist this context/page for later verify step
-                const identifier = otpIdentifier || (Math.random().toString(36).slice(2));
-                // store storageState with the session so callers can pass either identifier or storageState
-                sessionStore.set(identifier, { context, page, storageState, verified: false, otp_required: true });
-        return {
-            identifier,
-            storageState,
-            response: 'need_otp'
-        };
+        const storageState = await context.storageState();
+        if (foundVerification) {
+            const identifier = Math.random().toString(36).slice(2);
+            sessionStore.set(identifier, { context, page, storageState, verified: false, otp_required: true });
+            return {
+                identifier,
+                storageState,
+                response: 'need_otp'
+            };
+        } else {
+            await context.close().catch(() => {});
+            return { identifier: null, storageState: undefined, response: 'fail' };
+        }
     } catch (e) {
         console.error('requestOtp error:', e);
-                return { identifier: null, storageState: undefined, response: 'error' };
+                return { identifier: null, storageState: undefined, response: 'fail' };
     }
 }
 
@@ -100,16 +113,13 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
     try {
         // try a few selector variants for the verification input
         const verificationSelectors = [
-            'input[id="login-otp-validation-form-config.verificationCode"]',
-            'input[id*="verificationCode"]',
-            'input[name*="verificationCode"]',
-            'input[type="tel"]',
-            'input[type="text"]'
+            'input[id="login-otp-validation-form-config.verificationCode"]'
         ];
         let filled = false;
         for (const sel of verificationSelectors) {
             try {
                 await page.waitForSelector(sel, { state: 'visible', timeout: 4000 });
+                console.log(`verifyOtp: filling OTP using selector: ${sel}`);
                 await page.fill(sel, otp);
                 filled = true;
                 break;
@@ -134,17 +144,19 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
 
         const trustDeviceButton = 'button:has-text("Trust device")';
             try {
-                    await page.waitForSelector(trustDeviceButton, { state: "visible", timeout: 6000 });
+                    await page.waitForSelector(trustDeviceButton, { state: "visible", timeout: 3000 });
                     await page.click(trustDeviceButton);
                 } catch (error) {
-                    console.log("Trust device button not found, skipping...");
+                    console.log("Trust device button not found");
+                    return { response: 'fail' };
                 }
         const replaceButton = 'button:has-text("Replace")';
             try {
-                    await page.waitForSelector(replaceButton, { state: "visible", timeout: 6000 });
+                    await page.waitForSelector(replaceButton, { state: "visible", timeout: 3000 });
                     await page.click(replaceButton);
                 } catch (error) {
-                    console.log("Replace button not found, skipping...");
+                    console.log("Replace button not found");
+                    return { response: 'fail' };
                 }
                 
             await page.waitForURL("https://portal.australiansuper.com/", { timeout: 6000 });
@@ -164,11 +176,13 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
 export async function queryWithSession(storageIdentifier: any): Promise<{ id: string; name: string; balance: number; currency: string } | null> {
     // try to reuse existing stored context/page first
     let stored: any = undefined;
+    let sessionKey: string | null = null;
     if (typeof storageIdentifier === 'string') {
-        stored = sessionStore.get(storageIdentifier);
+        sessionKey = storageIdentifier;
+        stored = sessionStore.get(sessionKey);
     } else if (storageIdentifier && typeof storageIdentifier === 'object') {
-        for (const [, val] of sessionStore.entries()) {
-            if ((val as any).storageState === storageIdentifier) { stored = val; break; }
+        for (const [key, val] of sessionStore.entries()) {
+            if ((val as any).storageState === storageIdentifier) { stored = val; sessionKey = key; break; }
         }
     }
     // If there's a stored session but it hasn't been verified, don't proceed
@@ -178,7 +192,6 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
     }
     let context: BrowserContext | undefined;
     let page: Page | undefined;
-    let createdLocal = false;
 
     if (stored) {
         context = stored.context;
@@ -187,24 +200,7 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
 
     try {
         await page.goto("https://portal.australiansuper.com/");
-
-        const profileSelectors = [
-            'h2:has-text("Set-up your profile")',
-            'h2:has-text("Set up your profile")',
-            'text=Set-up your profile',
-            'text=Set up your profile'
-        ];
-
-        let profileFound = false;
-        for (const sel of profileSelectors) {
-            try {
-                await page.waitForSelector(sel, { state: 'visible', timeout: 3000 });
-                profileFound = true;
-                break;
-            } catch {
-                console.log(`Selector not found: ${sel}`);
-            }
-        }
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 })
 
         let name = "";
         try {
@@ -236,7 +232,8 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
         await page.waitForSelector(viewtransactionsLink, { state: "visible", timeout: 6000 });
         await page.click(viewtransactionsLink);
 
-        await page.waitForURL("https://portal.australiansuper.com/transactions/transaction-history", { timeout: 6000 });
+        // await page.waitForURL("https://portal.australiansuper.com/transactions/transaction-history", { timeout: 6000 });
+        await page.waitForLoadState('domcontentloaded', { timeout: 10000 })
 
         const balanceElements = await page.locator('p[class*="SummaryBalance"]');
         const balanceText = (await balanceElements.first().textContent())?.replace("$", "").trim() || "";
@@ -253,6 +250,18 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
         console.error('queryWithSession failed:', err);
         return null;
     } finally {
-        if (createdLocal && context) await context.close().catch(() => {});
+        // Ensure the session is cleared and browser/context closed after one query
+        try {
+            if (context) await context.close().catch(() => {});
+        } catch (_) {}
+        try {
+            if (sessionKey) sessionStore.delete(sessionKey);
+        } catch (_) {}
+        try {
+            if (browserInstance) {
+                await browserInstance.close().catch(() => {});
+                browserInstance = null;
+            }
+        } catch (_) {}
     }
 }
