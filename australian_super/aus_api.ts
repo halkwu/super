@@ -120,7 +120,7 @@ const resolvers = {
           const entry = context.otpStore.get(identifier);
           // Only allow verify when requestOtp previously returned 'need_otp'
           if (!entry || entry.verified === true || entry.otp_required === false) {
-            return { response: 'invalid_or_unnecessary' };
+            return { response: 'login first or incorrect_identifier' };
           }
           // prefer passing the session token back to verifyOtp so it reuses the stored page
           let passValue: any = identifier;
