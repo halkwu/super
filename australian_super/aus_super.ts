@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { chromium, Page, BrowserContext, Browser } from "playwright";
 
 // --- Shared browser/session management ---
@@ -67,7 +68,7 @@ export async function requestOtp(username: string, password: string, headless = 
 
         const storageState = await context.storageState();
         if (foundVerification) {
-            const identifier = Math.random().toString(36).slice(2);
+            const identifier = randomBytes(4).toString('hex');
             sessionStore.set(identifier, { context, page, storageState, verified: false, otp_required: true });
             return {
                 identifier,

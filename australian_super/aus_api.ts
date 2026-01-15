@@ -80,7 +80,7 @@ const resolvers = {
         if (!identifier) throw new Error('missing token for Account access; provide Authorization header or pass token argument');
 
         const details: any = await queryWithSession(identifier);
-        if (!details) return null;
+        if (!details) throw new Error('Invalid or expired identifier');
         return [{
           id: details.id,
           name: details.name,
