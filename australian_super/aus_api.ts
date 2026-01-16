@@ -2,7 +2,7 @@ import { ApolloServer } from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { requestOtp, verifyOtp, queryWithSession } from './aus_super';
+import { requestOtp, verifyOtp, queryWithSession, closeSession } from './aus_super';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -135,6 +135,9 @@ const resolvers = {
             try { entry.verified = true; context.otpStore.set(identifier, entry); } catch (_) {}
             return { response: res.response };
           }
+          // on failure, attempt to cleanup the stored session in aus_super
+          // try { await closeSession(identifier); } catch (_) {}
+          // try { context.otpStore.delete(identifier); } catch (_) {}
           return { response: res.response || 'fail' };
         }
 

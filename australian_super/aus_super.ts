@@ -1,26 +1,88 @@
 import { randomBytes } from "crypto";
 import { chromium, Page, BrowserContext, Browser } from "playwright";
+import { launchChrome } from './launch_chrome';
+const cp = require('child_process');
 
 // --- Shared browser/session management ---
 let browserInstance: Browser | null = null;
-const sessionStore = new Map<string, { context: BrowserContext; page: Page; storageState?: any; verified?: boolean; otp_required?: boolean }>();
+const sessionStore = new Map<string, { browser?: any; context: BrowserContext; page: Page; storageState?: any; verified?: boolean; otp_required?: boolean; launchedPid?: number | null }>();
 
-async function ensureBrowser(headless = false): Promise<Browser> {
-    if (!browserInstance) {
-        browserInstance = await chromium.launch({ headless });
-        // attempt graceful shutdown on process exit
-        process.on('exit', async () => {
+// Close a single session by object or by key. Deletes sessionStore entry when key is provided/found.
+export async function closeSession(sessionOrKey?: any): Promise<void> {
+    try {
+        if (!sessionOrKey) return;
+        let s: any = null;
+        let keyToDelete: string | null = null;
+        if (typeof sessionOrKey === 'string') {
+            keyToDelete = sessionOrKey;
+            s = sessionStore.get(sessionOrKey);
+        } else {
+            s = sessionOrKey;
+        }
+        if (!s) return;
+        try { if (s.page) await s.page.close().catch(() => {}); } catch (_) {}
+        try { if (s.context) await s.context.close().catch(() => {}); } catch (_) {}
+        try {
+            if (s.browser) {
+                if (s.browser.disconnect) await s.browser.disconnect().catch(() => {});
+                else await s.browser.close().catch(() => {});
+            }
+        } catch (_) {}
+        try { if (s.launchedPid) { cp.execSync(`taskkill /PID ${s.launchedPid} /T /F`); } } catch (_) {}
+        if (keyToDelete) {
+            try { sessionStore.delete(keyToDelete); } catch (_) {}
+        } else {
+            for (const [k, v] of sessionStore.entries()) {
+                if (v === s) { try { sessionStore.delete(k); } catch (_) {} ; break; }
+            }
+        }
+    } catch (_) {}
+}
+
+async function launchBrowser(headless = false): Promise<{ browser: any; context: any; launchedPid: number | null }> {
+    let browser: any = null;
+    let context: any = null;
+    let launchedPid: number | null = null;
+    if (!headless) {
+        try {
+            const exePath = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+            const userDataDir = process.env.PW_USER_DATA || 'C:\\pw-chrome-profile';
             try {
-                await browserInstance?.close();
-            } catch (_) {}
-        });
+                launchedPid = launchChrome(exePath, userDataDir, 9222);
+                if (launchedPid) console.log(`Launched Chrome (pid=${launchedPid}), waiting for CDP...`);
+            } catch (e) {
+                console.error('Error invoking launchChrome:', e);
+            }
+        } catch (e) {
+            console.error('Error preparing to launch Chrome:', e);
+        }
+
+        const start = Date.now();
+        const timeout = 10000;
+        while (Date.now() - start < timeout) {
+            try {
+                browser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+                break;
+            } catch (e) {
+                await new Promise(r => setTimeout(r, 500));
+            }
+        }
     }
-    return browserInstance;
+
+    if (!browser) {
+        browser = await chromium.launch({ headless });
+    }
+
+    const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
+    context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
+    // keep a reference for other helpers
+    try { browserInstance = browser as Browser; } catch (_) {}
+    return { browser, context, launchedPid };
 }
 
 export async function requestOtp(username: string, password: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
-    const browser = await ensureBrowser(headless);
-    const context = await browser.newContext();
+    const { browser: b, context, launchedPid } = await launchBrowser(headless);
+    browserInstance = b as Browser;
     const page = await context.newPage();
     try {
         await page.goto("https://portal.australiansuper.com/login");
@@ -42,34 +104,29 @@ export async function requestOtp(username: string, password: string, headless = 
 
         const verificationSelectors = [
             'input[id="login-otp-validation-form-config.verificationCode"]',
-            'input[id*="verificationCode"]',
-            'input[name*="verificationCode"]',
-            'input[type="tel"]',
-            'input[type="text"]'
         ];
 
         try {
             await Promise.race([
-                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 8000 }),
-                page.waitForTimeout(8000)
+                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 2000 }),
             ]);
-        } catch (_) {}
+        } catch (_) { /* navigation timeout - continue to check for verification input */ }
 
         let foundVerification = false;
         for (const sel of verificationSelectors) {
             try {
-                await page.waitForSelector(sel, { state: 'visible', timeout: 4000 });
+                await page.waitForSelector(sel, { state: 'visible', timeout: 2000 });
                 foundVerification = true;
                 break;
             } catch (_) {
-                // try next selector
+                await closeSession({ browser: b, context, page, launchedPid });
             }
         }
 
         const storageState = await context.storageState();
         if (foundVerification) {
             const identifier = randomBytes(4).toString('hex');
-            sessionStore.set(identifier, { context, page, storageState, verified: false, otp_required: true });
+            sessionStore.set(identifier, { browser: b, context, page, storageState, verified: false, otp_required: true, launchedPid });
             return {
                 identifier,
                 storageState,
@@ -81,20 +138,23 @@ export async function requestOtp(username: string, password: string, headless = 
         }
     } catch (e) {
         console.error('requestOtp error:', e);
-                return { identifier: null, storageState: undefined, response: 'fail' };
+        try { await closeSession({ browser: b, context, page, launchedPid }); } catch (_) {}
+        return { identifier: null, storageState: undefined, response: 'fail' };
     }
 }
 
 export async function verifyOtp(otp: string, storageState: any): Promise<{ response: string } > {
     // try to reuse an existing stored context/page first
     let stored: any = undefined;
+    let sessionKey: string | null = null;
     // If caller passed an identifier string, use it directly
     if (typeof storageState === 'string') {
+        sessionKey = storageState;
         stored = sessionStore.get(storageState);
     } else if (storageState && typeof storageState === 'object') {
         // If caller passed a storageState object, find the session whose stored.storageState === that object
-        for (const [, val] of sessionStore.entries()) {
-            if ((val as any).storageState === storageState) { stored = val; break; }
+        for (const [key, val] of sessionStore.entries()) {
+            if ((val as any).storageState === storageState) { stored = val; sessionKey = key; break; }
         }
     }
     
@@ -129,6 +189,8 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
         }
         if (!filled) {
             console.warn('verifyOtp: verification input not found');
+            // try { if (sessionKey) await closeSession(sessionKey); else await closeSession(stored); } catch (_) {}
+            // try { if (sessionKey) sessionStore.delete(sessionKey); } catch (_) {}
             return { response: 'verification_input_not_found' };
         }
         const verifyButton = 'button[data-target-id="login-otp-validation-form--continue-button"]';
@@ -142,7 +204,7 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
             await page.click(feedbackButton).catch(() => {});
         } catch (_) {}
 
-        const trustDeviceButton = 'button:has-text("Trust device")';
+        const trustDeviceButton = `button:has-text("Don't trust")`;
             try {
                     await page.waitForSelector(trustDeviceButton, { state: "visible", timeout: 3000 });
                     await page.click(trustDeviceButton);
@@ -150,14 +212,13 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
                     console.log("Trust device button not found");
                     return { response: 'fail' };
                 }
-        const replaceButton = 'button:has-text("Replace")';
-            try {
-                    await page.waitForSelector(replaceButton, { state: "visible", timeout: 3000 });
-                    await page.click(replaceButton);
-                } catch (error) {
-                    console.log("Replace button not found");
-                    return { response: 'fail' };
-                }
+        // const replaceButton = 'button:has-text("Replace")';
+        //     try {
+        //             await page.waitForSelector(replaceButton, { state: "visible", timeout: 3000 });
+        //             await page.click(replaceButton);
+        //         } catch (error) {
+        //             console.log("Replace button not found");
+        //         }
                 
             await page.waitForURL("https://portal.australiansuper.com/", { timeout: 6000 });
         // mark stored session as verified when verification succeeds
@@ -185,6 +246,11 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
             if ((val as any).storageState === storageIdentifier) { stored = val; sessionKey = key; break; }
         }
     }
+    // If there's no stored session for the given identifier, bail out early.
+    if (!stored) {
+        console.warn('queryWithSession: no stored session found for identifier');
+        return null;
+    }
     // If there's a stored session but it hasn't been verified, don't proceed
     if (stored && stored.verified !== true) {
         console.warn('queryWithSession: session not verified; call verifyOtp and ensure response is "success" before querying');
@@ -198,10 +264,11 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
         page = stored.page;
     }
 
+    let success = false;
     try {
         await page.goto("https://portal.australiansuper.com/");
-        await page.waitForLoadState('domcontentloaded', { timeout: 10000 })
 
+        await page.waitForSelector('h1', { timeout: 6000 })
         let name = "";
         try {
             const h1 = page.locator("h1").first();
@@ -210,15 +277,16 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
                 const m = heading.match(/Welcome\s+(.+)$/i);
                 if (m) name = m[1].trim();
             }
-       } catch (e) {}
+       } catch (e) { console.error(e); }
 
+       await page.waitForSelector('p:has-text("Member number") + p', { timeout: 6000 })
         let memberId = "";
         try {
             const memberIdLocator = page.locator('p:has-text("Member number") + p').first();
             if (await memberIdLocator.count() > 0) {
                 memberId = (await memberIdLocator.textContent())?.trim() || "";
             } 
-        } catch (e) {}
+        } catch (e) { console.error(e); }
 
         const transactionsButton = 'button:has-text("Transactions")';
         await page.waitForSelector(transactionsButton, { state: "visible", timeout: 6000 });
@@ -245,23 +313,15 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
             balance: balance,
             currency: "AUD"
         };
+        success = true;
         return result;
     } catch (err) {
         console.error('queryWithSession failed:', err);
         return null;
     } finally {
-        // Ensure the session is cleared and browser/context closed after one query
         try {
-            if (context) await context.close().catch(() => {});
-        } catch (_) {}
-        try {
-            if (sessionKey) sessionStore.delete(sessionKey);
-        } catch (_) {}
-        try {
-            if (browserInstance) {
-                await browserInstance.close().catch(() => {});
-                browserInstance = null;
-            }
+            await closeSession(sessionKey ?? stored);
         } catch (_) {}
     }
 }
+
