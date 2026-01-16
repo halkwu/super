@@ -95,7 +95,7 @@ const resolvers = {
         const { id, pin } = payload || {};
         
         if (id && pin) {
-          const res = await requestSession(id, pin, true);
+          const res = await requestSession(id, pin, false);
           return {
             response: res.response,
             identifier: res.identifier

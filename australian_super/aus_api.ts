@@ -2,7 +2,7 @@ import { ApolloServer } from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { requestOtp, verifyOtp, queryWithSession, closeSession } from './aus_super';
+import { requestOtp, verifyOtp, queryWithSession, closeSession, resendOtp } from './aus_super';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -99,7 +99,14 @@ const resolvers = {
       try {
         if (!context.otpStore) context.otpStore = new Map<string, any>();
 
-        const { id, pin, otp, identifier } = payload || {};
+        const { id, pin, otp, identifier, send } = payload || {};
+
+        // Resend OTP: clients call with `{ send: true, identifier: <token> }`
+        if (send === true) {
+          if (!identifier) return { response: 'missing_identifier' };
+          const r = await resendOtp(identifier).catch(() => ({ response: 'fail' }));
+          return { response: (r && (r as any).response) ? (r as any).response : 'fail' };
+        }
 
         // First step: request OTP token
         if (id && pin) {

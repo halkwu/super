@@ -234,6 +234,35 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
     }
 }
 
+export async function resendOtp(storageIdentifier: any): Promise<{ response: string }> {
+    // find stored session by identifier string or storageState object
+    let stored: any = undefined;
+    let sessionKey: string | null = null;
+    if (typeof storageIdentifier === 'string') {
+        sessionKey = storageIdentifier;
+        stored = sessionStore.get(sessionKey);
+    } else if (storageIdentifier && typeof storageIdentifier === 'object') {
+        for (const [key, val] of sessionStore.entries()) {
+            if ((val as any).storageState === storageIdentifier) { stored = val; sessionKey = key; break; }
+        }
+    }
+
+    if (!stored || !stored.page) {
+        return { response: 'invalid_identifier' };
+    }
+
+    const page: Page = stored.page;
+    try {
+        const resendSelector = 'button[data-target-id="login-otp-validation-form--resend-code-button"]';
+        await page.waitForSelector(resendSelector, { state: 'visible', timeout: 3000 });
+        await page.click(resendSelector);
+        return { response: 'sent' };
+    } catch (err) {
+        console.warn('resendOtp error:', err);
+        return { response: 'fail' };
+    }
+}
+
 export async function queryWithSession(storageIdentifier: any): Promise<{ id: string; name: string; balance: number; currency: string } | null> {
     // try to reuse existing stored context/page first
     let stored: any = undefined;
