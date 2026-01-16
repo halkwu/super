@@ -20,6 +20,32 @@ export async function closeSession(sessionOrKey?: any): Promise<void> {
             s = sessionOrKey;
         }
         if (!s) return;
+
+        // Attempt to clear local/session storage and cookies before closing.
+        try {
+            const page = s.page as Page | undefined;
+            const context = s.context as BrowserContext | undefined;
+            if (page) {
+                try {
+                    await page.evaluate(() => { try { localStorage.clear(); sessionStorage.clear(); } catch (e) {} });
+                } catch (_) {}
+            }
+
+            if (context && typeof (context as any).clearCookies === 'function') {
+                try { await (context as any).clearCookies(); } catch (_) {}
+            } else if (page && typeof (page as any).context === 'function') {
+                try {
+                    // @ts-ignore
+                    const client = await (page as any).context().newCDPSession(page);
+                    await client.send('Network.clearBrowserCookies');
+                    try {
+                        await client.send('Storage.clearDataForOrigin', { origin: 'https://portal.australiansuper.com', storageTypes: 'all' });
+                    } catch (_) {}
+                } catch (_) {}
+            }
+        } catch (_) {}
+
+        // Close page/context/browser and kill any launched PID
         try { if (s.page) await s.page.close().catch(() => {}); } catch (_) {}
         try { if (s.context) await s.context.close().catch(() => {}); } catch (_) {}
         try {
@@ -29,6 +55,7 @@ export async function closeSession(sessionOrKey?: any): Promise<void> {
             }
         } catch (_) {}
         try { if (s.launchedPid) { cp.execSync(`taskkill /PID ${s.launchedPid} /T /F`); } } catch (_) {}
+
         if (keyToDelete) {
             try { sessionStore.delete(keyToDelete); } catch (_) {}
         } else {
@@ -76,13 +103,13 @@ async function launchBrowser(headless = false): Promise<{ browser: any; context:
     const existingContexts = (browser as any).contexts ? (browser as any).contexts() : [];
     context = existingContexts && existingContexts.length ? existingContexts[0] : await browser.newContext();
     // keep a reference for other helpers
-    try { browserInstance = browser as Browser; } catch (_) {}
+    try { browserInstance = browser; } catch (_) {}
     return { browser, context, launchedPid };
 }
 
 export async function requestOtp(username: string, password: string, headless = false): Promise<{ identifier: string | null; storageState?: any; response?: string }> {
     const { browser: b, context, launchedPid } = await launchBrowser(headless);
-    browserInstance = b as Browser;
+    browserInstance = b;
     const page = await context.newPage();
     try {
         await page.goto("https://portal.australiansuper.com/login");
@@ -353,4 +380,5 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id: st
         } catch (_) {}
     }
 }
+
 

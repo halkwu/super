@@ -2,7 +2,7 @@ import { ApolloServer } from 'apollo-server';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
-import { requestOtp, verifyOtp, queryWithSession, closeSession, resendOtp } from './aus_super';
+import { requestOtp, verifyOtp, queryWithSession, resendOtp } from './aus_super';
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -105,7 +105,7 @@ const resolvers = {
         if (send === true) {
           if (!identifier) return { response: 'missing_identifier' };
           const r = await resendOtp(identifier).catch(() => ({ response: 'fail' }));
-          return { response: (r && (r as any).response) ? (r as any).response : 'fail' };
+          return { response: r.response };
         }
 
         // First step: request OTP token
