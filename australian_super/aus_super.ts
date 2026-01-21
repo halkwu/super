@@ -216,15 +216,11 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
         }
         if (!filled) {
             console.warn('verifyOtp: verification input not found');
-            // try { if (sessionKey) await closeSession(sessionKey); else await closeSession(stored); } catch (_) {}
-            // try { if (sessionKey) sessionStore.delete(sessionKey); } catch (_) {}
             return { response: 'verification_input_not_found' };
         }
         const verifyButton = 'button[data-target-id="login-otp-validation-form--continue-button"]';
         await page.waitForSelector(verifyButton, { state: 'visible', timeout: 3000 });
         await page.click(verifyButton);
-        // Wait for successful navigation to the portal home
-        // Wait longer for navigation or check page for success indicators
         try {
             const feedbackButton = 'button:has-text("No Thanks")';
             await page.waitForSelector(feedbackButton, { state: 'visible', timeout: 3000 });
@@ -238,17 +234,8 @@ export async function verifyOtp(otp: string, storageState: any): Promise<{ respo
                 } catch (error) {
                     console.log("Trust device button not found");
                     return { response: 'fail' };
-                }
-        // const replaceButton = 'button:has-text("Replace")';
-        //     try {
-        //             await page.waitForSelector(replaceButton, { state: "visible", timeout: 3000 });
-        //             await page.click(replaceButton);
-        //         } catch (error) {
-        //             console.log("Replace button not found");
-        //         }
-                
+                }             
             await page.waitForURL("https://portal.australiansuper.com/", { timeout: 6000 });
-        // mark stored session as verified when verification succeeds
         if (stored) {
             try { (stored as any).verified = true; } catch (_) {}
         }

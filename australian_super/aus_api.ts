@@ -111,9 +111,7 @@ const resolvers = {
         // First step: request OTP token
         if (id && pin) {
           const { identifier, storageState, response } = await requestOtp(id, pin, false);
-          // store both token and storageState so verifyOtp can reuse the original page
           if (identifier) {
-            // if requestOtp indicated immediate success, mark verified
             context.otpStore.set(identifier, { token: identifier, storageState, verified: false, otp_required: response === 'need_otp' });
           }
           return { 
