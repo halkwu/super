@@ -26,7 +26,7 @@ async function safeCloseBrowser(browser: Browser | any) {
     } catch (_) {}
 }
 
-export async function closeSession(sessionOrKey?: string | SessionEntry, opts?: { preserveBrowser?: boolean }): Promise<void> {
+async function closeSession(sessionOrKey?: string | SessionEntry, opts?: { preserveBrowser?: boolean }): Promise<void> {
     const preserveBrowser = opts?.preserveBrowser === true;
     try {
         if (!sessionOrKey) return;

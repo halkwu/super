@@ -348,19 +348,3 @@ export async function queryWithSession(storageIdentifier: any): Promise<{ id?: s
 		return null;
 	}
 }
-
-
-// async function main() {
-// 	const [, , id, pin, headlessArg] = process.argv;
-// 	try {
-// 		const info = await queryBalance(id, pin, headlessArg !== 'false');
-// 		console.log(JSON.stringify(info, null, 2));
-// 	} catch (err) {
-// 		console.error("queryBalance failed:", err);
-// 	}
-// }
-
-// if (require.main === module) {
-// 	main();
-// }
-

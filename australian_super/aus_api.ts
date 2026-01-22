@@ -4,7 +4,20 @@ import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
 import { requestOtp, verifyOtp, queryWithSession, resendOtp } from './aus_super';
 
+// Concurrency / queueing: allow up to 3 concurrent active sessions; queue FIFO
+const MAX_CONCURRENT = 3;
+const SLOT_PROFILES = [
+  'C:\\pw-chrome-profile_1',
+  'C:\\pw-chrome-profile_2',
+  'C:\\pw-chrome-profile_3'
+];
+const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
+const waitQueue: Array<(slotIndex: number) => void> = [];
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
+
+const sessions = new Map<string, { slotHeld: boolean; createdAt: number; slotIndex?: number }>();
+
+const globalOtpStore = new Map<string, any>();
 
 const JSONScalar = new GraphQLScalarType({
   name: 'JSON',
@@ -56,16 +69,6 @@ function parseLiteral(ast: any): any {
   }
 }
 
-// Concurrency / queueing: allow up to 3 concurrent active sessions; queue FIFO
-const MAX_CONCURRENT = 3;
-const SLOT_PROFILES = [
-  'C:\\pw-chrome-profile_1',
-  'C:\\pw-chrome-profile_2',
-  'C:\\pw-chrome-profile_3'
-];
-const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
-const waitQueue: Array<(slotIndex: number) => void> = [];
-
 function acquireSlot(): Promise<number> {
   const freeIndex = activeSlots.findIndex(v => !v);
   if (freeIndex !== -1) {
@@ -112,10 +115,6 @@ function releaseSlot(slotIndex?: number) {
     console.error('releaseSlot error:', e);
   }
 }
-
-const sessions = new Map<string, { slotHeld: boolean; createdAt: number; slotIndex?: number }>();
-
-const globalOtpStore = new Map<string, any>();
 
 const resolvers = {
   JSON: JSONScalar,

@@ -4,11 +4,22 @@ import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
 import { queryWithSession, requestSession } from './cbus';
 
-// Concurrency / queueing: allow up to 3 concurrent active sessions;
-// additional auth requests are queued FIFO until a slot becomes available.
 const MAX_CONCURRENT = 3;
 let activeCount = 0;
 const waitQueue: Array<() => void> = [];
+
+const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
+
+const JSONScalar = new GraphQLScalarType({
+  name: 'JSON',
+  description: 'Arbitrary JSON value',
+  parseValue: (value) => value,
+  serialize: (value) => value,
+  parseLiteral: (ast: any) => parseLiteral(ast),
+});
+
+type HeldSession = { slotHeld: boolean; createdAt: number };
+const sessions = new Map<string, HeldSession>();
 
 function acquireSlot(): Promise<void> {
   if (activeCount < MAX_CONCURRENT) {
@@ -33,16 +44,6 @@ function releaseSlot() {
     try { next(); } catch (e) { /* ignore */ }
   }
 }
-
-const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
-
-const JSONScalar = new GraphQLScalarType({
-  name: 'JSON',
-  description: 'Arbitrary JSON value',
-  parseValue: (value) => value,
-  serialize: (value) => value,
-  parseLiteral: (ast: any) => parseLiteral(ast),
-});
 
 function parseLiteral(ast: any): any {
   switch (ast.kind) {
@@ -125,9 +126,6 @@ const resolvers = {
     }
   }
 };
-
-type HeldSession = { slotHeld: boolean; createdAt: number };
-const sessions = new Map<string, HeldSession>();
 
 async function start() {
   const server = new ApolloServer({

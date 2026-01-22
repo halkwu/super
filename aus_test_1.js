@@ -27,6 +27,14 @@ mutation Verify($payload: JSON) {
 }
 `;
 
+const resendOtpMutation = `
+mutation ResendOtp($payload: JSON) {
+  auth(payload: $payload) {
+    response
+  }
+}
+`;
+
 const combinedQuery = `
 query GetBalanceAndTxs($identifier: String!) {
   account(identifier: $identifier) {
@@ -100,58 +108,76 @@ async function runUser(userIndex) {
   let identifier = authData.identifier;
 
   if (authData.response === 'need_otp') {
-    // Allow up to 2 attempts. On first incorrect attempt, do not release slot
-    // or clear session — server will keep the session alive and return
-    // "verify code incorrect"; prompt user again. On second incorrect,
-    // server will cleanup and return "fail".
-    let attempts = 0;
-    let verified = false;
-    while (attempts < 2 && !verified) {
-      attempts += 1;
-      const code = String(await askQuestion(`[User ${userIndex}] Enter OTP (attempt ${attempts}/2): `)).trim();
+  let attempts = 0;
+  let verified = false;
 
-      const verifyRes = await postJson(SERVER_URL, {
-        query: verifyMutation,
-        variables: {
-          payload: {
-            identifier,
-            otp: code,
+  while (attempts < 2 && !verified) {
+    attempts += 1;
+    let code = '';
+    let send = '';
+
+    do {
+      send = String(await askQuestion(`[User ${userIndex}] Resend OTP? (true to resend, enter to ready to input otp): `)).trim();
+
+      if (send === 'true') {
+        const resendRes = await postJson(SERVER_URL, {
+          query: resendOtpMutation,
+          variables: {
+            payload: {
+              "send": true,
+              "identifier": identifier,
+            },
           },
-        },
-      });
+        });
 
-      console.log(`[User ${userIndex}] Verify status:`, verifyRes.status);
-      console.log(`[User ${userIndex}] Verify body:`, verifyRes.body);
-
-      const verifyBody = JSON.parse(verifyRes.body);
-      const resp = verifyBody?.data?.auth?.response;
-
-      if (resp === 'success') {
-        console.log(`[User ${userIndex}] OTP verified`);
-        verified = true;
-        break;
-      }
-
-      if (resp === 'verify code incorrect') {
-        console.log(`[User ${userIndex}] Verification incorrect — you may retry once.`);
-        if (attempts >= 2) {
-          console.log(`[User ${userIndex}] Second attempt failed, exiting.`);
-          return;
-        }
-        // otherwise loop to prompt again
-      } else if (resp === 'fail') {
-        console.log(`[User ${userIndex}] Verification failed and session cleaned up by server.`);
-        return;
+        console.log(`[User ${userIndex}] Resend OTP status:`, resendRes.status);
+        console.log(`[User ${userIndex}] Resend OTP body:`, resendRes.body);
       } else {
-        console.log(`[User ${userIndex}] Verification unexpected response: ${resp}`);
+        code = String(await askQuestion(`[User ${userIndex}] Enter OTP (attempt ${attempts}/2): `)).trim();
+      }
+    } while (send === 'true');
+
+    const verifyRes = await postJson(SERVER_URL, {
+      query: verifyMutation,
+      variables: {
+        payload: {
+          "identifier": identifier,
+          "otp": code,
+        },
+      },
+    });
+
+    console.log(`[User ${userIndex}] Verify status:`, verifyRes.status);
+    console.log(`[User ${userIndex}] Verify body:`, verifyRes.body);
+
+    const verifyBody = JSON.parse(verifyRes.body);
+    const resp = verifyBody?.data?.auth?.response;
+
+    if (resp === 'success') {
+      console.log(`[User ${userIndex}] OTP verified`);
+      verified = true;
+      break;
+    }
+
+    if (resp === 'verify code incorrect') {
+      console.log(`[User ${userIndex}] Verification incorrect — you may retry once.`);
+      if (attempts >= 2) {
+        console.log(`[User ${userIndex}] Second attempt failed, exiting.`);
         return;
       }
+    } else if (resp === 'fail') {
+      console.log(`[User ${userIndex}] Verification failed and session cleaned up by server.`);
+      return;
+    } else {
+      console.log(`[User ${userIndex}] Verification unexpected response: ${resp}`);
+      return;
     }
   }
+}
 
   const queryRes = await postJson(SERVER_URL, {
     query: combinedQuery,
-    variables: { identifier },
+    variables: { "identifier": identifier },
   });
 
   console.log(`[User ${userIndex}] Query status:`, queryRes.status);
