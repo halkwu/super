@@ -4,47 +4,34 @@ import { join } from 'path';
 import { GraphQLScalarType, Kind } from 'graphql';
 import { requestOtp, verifyOtp, queryWithSession, resendOtp } from './aus_super';
 
-// Concurrency / queueing: allow up to 3 concurrent active sessions; queue FIFO
+const globalOtpStore = new Map<string, any>();
+
 const MAX_CONCURRENT = 3;
+const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
+const waitQueue: Array<(slotIndex: number) => void> = [];
+
 const SLOT_PROFILES = [
   'C:\\pw-chrome-profile_1',
   'C:\\pw-chrome-profile_2',
-  'C:\\pw-chrome-profile_3'
+  'C:\\pw-chrome-profile_3',
 ];
-const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
-const waitQueue: Array<(slotIndex: number) => void> = [];
+
+type Session = { 
+  slotHeld: boolean; 
+  createdAt: number; 
+  slotIndex?: number 
+};
+
+const sessions = new Map<string, Session>();
+
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
-
-const sessions = new Map<string, { slotHeld: boolean; createdAt: number; slotIndex?: number }>();
-
-const globalOtpStore = new Map<string, any>();
 
 const JSONScalar = new GraphQLScalarType({
   name: 'JSON',
   description: 'Arbitrary JSON value',
   parseValue: (value) => value,
   serialize: (value) => value,
-  parseLiteral: (ast) => {
-    switch (ast.kind) {
-      case Kind.STRING:
-      case Kind.BOOLEAN:
-        return ast.value;
-      case Kind.INT:
-      case Kind.FLOAT:
-        return Number(ast.value);
-      case Kind.OBJECT: {
-        const value: any = Object.create(null);
-        ast.fields.forEach((field: any) => {
-          value[field.name.value] = parseLiteral(field.value);
-        });
-        return value;
-      }
-      case Kind.LIST:
-        return ast.values.map(parseLiteral);
-      default:
-        return null;
-    }
-  }
+  parseLiteral: (ast: any) => parseLiteral(ast),
 });
 
 function parseLiteral(ast: any): any {
@@ -74,7 +61,7 @@ function acquireSlot(): Promise<number> {
   if (freeIndex !== -1) {
     activeSlots[freeIndex] = true;
     const activeCount = activeSlots.filter(Boolean).length;
-    console.log(`[slot] acquire -> index=${freeIndex} active=${activeCount}`);
+    console.log(`[slot] acquire -> index=${freeIndex} active=${activeCount}, queue=${waitQueue.length}`);
     return Promise.resolve(freeIndex);
   }
   return new Promise((resolve) => {
@@ -89,27 +76,30 @@ function releaseSlot(slotIndex?: number) {
     if (typeof slotIndex === 'number' && slotIndex >= 0 && slotIndex < activeSlots.length) {
       const next = waitQueue.shift();
       if (next) {
+        // hand off this slot to the next waiter
         try { next(slotIndex); } catch (e) { /* ignore */ }
         const activeCount = activeSlots.filter(Boolean).length;
-        console.log(`[slot] handoff -> index=${slotIndex} active=${activeCount}`);
+        console.log(`[slot] handoff -> index=${slotIndex} active=${activeCount}, queue=${waitQueue.length}`);
         return;
       }
+      // no queued waiters — mark slot free
       activeSlots[slotIndex] = false;
       const activeCount = activeSlots.filter(Boolean).length;
-      console.log(`[slot] release -> index=${slotIndex} active=${activeCount}`);
+      console.log(`[slot] release -> index=${slotIndex} active=${activeCount},  queue=${waitQueue.length}`);
     } else {
+      // fallback: if no slotIndex provided, try to free the first occupied slot
       const idx = activeSlots.findIndex(v => v);
       if (idx === -1) return;
       const next = waitQueue.shift();
       if (next) {
         try { next(idx); } catch (e) { /* ignore */ }
         const activeCount = activeSlots.filter(Boolean).length;
-        console.log(`[slot] handoff -> index=${idx} active=${activeCount}`);
+        console.log(`[slot] handoff -> index=${idx} active=${activeCount}, queue=${waitQueue.length}`);
         return;
       }
       activeSlots[idx] = false;
       const activeCount = activeSlots.filter(Boolean).length;
-      console.log(`[slot] release -> index=${idx} active=${activeCount}`);
+      console.log(`[slot] release -> index=${idx} active=${activeCount}, queue=${waitQueue.length}`);
     }
   } catch (e) {
     console.error('releaseSlot error:', e);
@@ -248,24 +238,12 @@ const resolvers = {
   }
 };
 
-// periodically force-release stale held sessions
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, s] of sessions) {
-    if (now - s.createdAt > 30_000) {
-      console.warn(`[slot] force release expired session ${id}`);
-      sessions.delete(id);
-      try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
-    }
-  }
-}, 10_000);
-
 async function start() {
   const server = new ApolloServer({
     typeDefs,
     resolvers,
-    // use a persistent otpStore so OTP sessions survive across GraphQL requests
-    context: ({ req }) => ({ headers: req ? req.headers : {}, fetchCache: new Map(), otpStore: globalOtpStore }),
+    context: () => ({}),
+    
     plugins: [
       {
         async requestDidStart(requestContext) {
@@ -279,9 +257,9 @@ async function start() {
               if (!id) return;
               const s = sessions.get(id);
               if (!s || !s.slotHeld) return;
-              sessions.delete(id);
-              try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
-              console.log(`[slot] session=${id} released & cleared`);
+                  sessions.delete(id);
+                  try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
+                  console.log(`[slot] session=${id} released & cleared`);
             }
           };
         }
@@ -292,7 +270,18 @@ async function start() {
   console.log(`GraphQL server running at ${url}`);
 }
 
-start().catch((err) => {
-  console.error('Failed to start GraphQL server:', err);
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, s] of sessions) {
+    if (now - s.createdAt > 30_000) {
+      console.warn(`[slot] force release expired session ${id}`);
+      sessions.delete(id);
+      try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
+    }
+  }
+}, 10_000);
+
+start().catch((e) => {
+  console.error('Failed to start GraphQL server', e);
   process.exit(1);
 });

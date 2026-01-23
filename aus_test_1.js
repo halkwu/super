@@ -6,8 +6,8 @@ const readline = require('readline');
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:4000/';
 
 const SHARED_VARS = {
-  id: process.env.ID || 'hwu@ironflytechnologies.com',
-  pin: process.env.PIN || 'BeForever.520',
+  id:'hwu@ironflytechnologies.com',
+  pin:'BeForever.520',
 };
 
 const authMutation = `

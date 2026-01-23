@@ -5,8 +5,16 @@ import { GraphQLScalarType, Kind } from 'graphql';
 import { queryWithSession, requestSession } from './cbus';
 
 const MAX_CONCURRENT = 3;
-let activeCount = 0;
-const waitQueue: Array<() => void> = [];
+const activeSlots: boolean[] = new Array(MAX_CONCURRENT).fill(false);
+const waitQueue: Array<(slotIndex: number) => void> = [];
+
+type Session = {
+  slotHeld: boolean;
+  createdAt: number;
+  slotIndex?: number 
+};
+
+const sessions = new Map<string, Session>();
 
 const typeDefs = readFileSync(join(__dirname, '..', 'schema.graphql'), 'utf8');
 
@@ -17,33 +25,6 @@ const JSONScalar = new GraphQLScalarType({
   serialize: (value) => value,
   parseLiteral: (ast: any) => parseLiteral(ast),
 });
-
-type HeldSession = { slotHeld: boolean; createdAt: number };
-const sessions = new Map<string, HeldSession>();
-
-function acquireSlot(): Promise<void> {
-  if (activeCount < MAX_CONCURRENT) {
-    activeCount++;
-    console.log(`[slot] acquire -> active=${activeCount}`);
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    waitQueue.push(resolve);
-    console.log(`[slot] queued -> active=${activeCount}, queue=${waitQueue.length}`);
-  });
-}
-
-function releaseSlot() {
-  if (activeCount <= 0) return;
-  activeCount--;
-  console.log(`[slot] release -> active=${activeCount}`);
-  const next = waitQueue.shift();
-  if (next) {
-    activeCount++;
-    console.log(`[slot] handoff -> active=${activeCount}`);
-    try { next(); } catch (e) { /* ignore */ }
-  }
-}
 
 function parseLiteral(ast: any): any {
   switch (ast.kind) {
@@ -64,6 +45,56 @@ function parseLiteral(ast: any): any {
       return ast.values.map(parseLiteral);
     default:
       return null;
+  }
+}
+
+function acquireSlot(): Promise<number> {
+  const freeIndex = activeSlots.findIndex(v => !v);
+  if (freeIndex !== -1) {
+    activeSlots[freeIndex] = true;
+    const activeCount = activeSlots.filter(Boolean).length;
+    console.log(`[slot] acquire -> index=${freeIndex} active=${activeCount}, queue=${waitQueue.length}`);
+    return Promise.resolve(freeIndex);
+  }
+  return new Promise((resolve) => {
+    waitQueue.push(resolve);
+    const activeCount = activeSlots.filter(Boolean).length;
+    console.log(`[slot] queued -> active=${activeCount}, queue=${waitQueue.length}`);
+  });
+}
+
+function releaseSlot(slotIndex?: number) {
+  try {
+    if (typeof slotIndex === 'number' && slotIndex >= 0 && slotIndex < activeSlots.length) {
+      const next = waitQueue.shift();
+      if (next) {
+        // hand off this slot to the next waiter
+        try { next(slotIndex); } catch (e) { /* ignore */ }
+        const activeCount = activeSlots.filter(Boolean).length;
+        console.log(`[slot] handoff -> index=${slotIndex} active=${activeCount}, queue=${waitQueue.length}`);
+        return;
+      }
+      // no queued waiters — mark slot free
+      activeSlots[slotIndex] = false;
+      const activeCount = activeSlots.filter(Boolean).length;
+      console.log(`[slot] release -> index=${slotIndex} active=${activeCount},  queue=${waitQueue.length}`);
+    } else {
+      // fallback: if no slotIndex provided, try to free the first occupied slot
+      const idx = activeSlots.findIndex(v => v);
+      if (idx === -1) return;
+      const next = waitQueue.shift();
+      if (next) {
+        try { next(idx); } catch (e) { /* ignore */ }
+        const activeCount = activeSlots.filter(Boolean).length;
+        console.log(`[slot] handoff -> index=${idx} active=${activeCount}, queue=${waitQueue.length}`);
+        return;
+      }
+      activeSlots[idx] = false;
+      const activeCount = activeSlots.filter(Boolean).length;
+      console.log(`[slot] release -> index=${idx} active=${activeCount}, queue=${waitQueue.length}`);
+    }
+  } catch (e) {
+    console.error('releaseSlot error:', e);
   }
 }
 
@@ -132,6 +163,7 @@ async function start() {
     typeDefs,
     resolvers,
     context: () => ({}),
+    
     plugins: [
       {
         async requestDidStart(requestContext) {
@@ -145,9 +177,9 @@ async function start() {
               if (!id) return;
               const s = sessions.get(id);
               if (!s || !s.slotHeld) return;
-              sessions.delete(id);
-              releaseSlot();
-              console.log(`[slot] session=${id} released & cleared`);
+                  sessions.delete(id);
+                  try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
+                  console.log(`[slot] session=${id} released & cleared`);
             }
           };
         }
@@ -164,7 +196,7 @@ setInterval(() => {
     if (now - s.createdAt > 30_000) {
       console.warn(`[slot] force release expired session ${id}`);
       sessions.delete(id);
-      releaseSlot();
+      try { if (typeof s.slotIndex === 'number') releaseSlot(s.slotIndex); else releaseSlot(); } catch (_) { releaseSlot(); }
     }
   }
 }, 10_000);
