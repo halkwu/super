@@ -381,7 +381,7 @@ export async function verifyOtp(otp: string, storageIdentifier: any): Promise<{ 
         // If this is the first incorrect attempt, keep the session/browser alive
         // and allow the caller/user to retry once more.
         if ((stored.otpAttempts || 0) <= 1) {
-            return { response: 'verify code incorrect' };
+            return { response: 'verify code incorrect, you only have 1 more attempt' };
         }
 
         // Second failure: cleanup the session, release the slot and close browser.
