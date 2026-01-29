@@ -287,7 +287,7 @@ export async function requestOtp(username: string, password: string, headless = 
         const nextButton = 'button[data-target-id="login--form--login-proceed-cta"]';
         await clickFirst(page, [nextButton]);
 
-        const passwordInput = '#login-form\\.password';
+        const passwordInput = '#login-form\\.password-fieldset\\.password';
         await page.waitForSelector(passwordInput, { state: 'visible', timeout: 8000 });
         await findAndFill(page, [passwordInput], password);
 

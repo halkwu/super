@@ -163,13 +163,14 @@ const resolvers = {
         if (!details) throw new Error('Invalid or expired identifier');
         const prefix = details.id || details.cardNumber || '';
         return (details.transactions || []).map((t: any, idx: number) => ({
-          transactionId: `${prefix}-${idx + 1}`,
-          transactionTime: t.transactionTime || t.date,
-          amount: t.amount,
-          currency: t.currency,
-          description: t.description,
-          status: 'confirmed',
-          balance: t.balance,
+          transactionId: `${prefix}-${idx + 1}` || null,
+          transactionTime: t.transactionTime || t.date || null,
+          amount: t.amount || null,
+          currency: t.currency || null,
+          description: t.description || null,
+          status: null,
+          // 'confirmed',
+          balance: t.balance || null,
         }));
       } catch (err: any) {
         const msg = err && err.message ? err.message : 'Failed to fetch transactions';
